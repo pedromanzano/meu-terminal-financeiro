@@ -1,0 +1,18 @@
+[theme]
+# Cor principal (Botões, sliders, links) - Verde Neon Profissional
+primaryColor="#00CC96"
+
+# Forçar o modo escuro para todos os utilizadores
+base="dark"
+
+# Cor do fundo principal (Preto profundo)
+backgroundColor="#0E1117"
+
+# Cor do fundo secundário (Menu lateral e caixas de seleção)
+secondaryBackgroundColor="#1E1E24"
+
+# Cor do texto principal
+textColor="#E0E0E0"
+
+# Fonte mais moderna e limpa
+font="sans serif"
