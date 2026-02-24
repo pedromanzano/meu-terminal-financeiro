@@ -208,7 +208,7 @@ with st.sidebar:
     
     # --- NOVO BLOCO: ATIVOS EXTERNOS ---
     st.subheader("🏦 2. Ativos Externos")
-    st.write("Adicione património que não está na B3.")
+    st.write("Adicione patrimônio que não está na B3.")
     
     # Renda Fixa (Tesouro, CDBs, Reserva)
     st.markdown("**Segurança & Reserva**")
