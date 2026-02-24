@@ -127,23 +127,46 @@ if arquivo_usuario is not None:
         carteira['Max_52S'] = max_52w_lista
         carteira['Tendência'] = tendencia_lista
 
-        # 6. Apresentação no ecrã (Tabela Atualizada)
+        # ====================================================================
+        # 6. TABELA DE POSIÇÃO ATUAL (VISUAL PROFISSIONAL)
+        # ====================================================================
         st.divider()
         st.subheader("📊 Posição Atual e Indicadores Técnicos")
-        
-        carteira_formatada = carteira.copy()
-        # Formatar as novas colunas como moeda
-        colunas_moeda = ['custo_total_investido', 'preco_medio', 'preco_atual', 'valor_patrimonio_atual', 'lucro_prejuizo', 'MM200', 'Min_52S', 'Max_52S']
 
-        for col in colunas_moeda:
-            carteira_formatada[col] = carteira_formatada[col].apply(lambda x: f"R$ {x:,.2f}")
-            
-        carteira_formatada['rentabilidade_%'] = carteira_formatada['rentabilidade_%'].apply(lambda x: f"{x:,.2f}%")
+        # Criamos um mapeamento de nomes "feios" para nomes "bonitos"
+        nomes_colunas = {
+            "ativo": "Ativo",
+            "quantidade_total": "Quantidade",
+            "preco_medio": "Preço Médio",
+            "preco_atual": "Cotação Atual",
+            "Tendência": "Tendência",
+            "MM200": "Média 200 Dias",
+            "Min_52S": "Mín (52 sem)",
+            "Max_52S": "Máx (52 sem)",
+            "lucro_prejuizo": "Lucro/Prejuízo (R$)",
+            "rentabilidade_%": "Retorno (%)"
+        }
 
-        # Organizar as colunas para o que importa ficar visível primeiro
-        colunas_exibicao = ['ativo', 'quantidade_total', 'preco_medio', 'preco_atual', 'Tendência', 'MM200', 'Min_52S', 'Max_52S', 'lucro_prejuizo', 'rentabilidade_%']
-        
-        st.dataframe(carteira_formatada[colunas_exibicao], use_container_width=True, hide_index=True)
+        # Selecionamos as colunas que queremos exibir na ordem correta
+        colunas_exibicao = list(nomes_colunas.keys())
+
+        # Exibição com formatação de moeda e nomes limpos
+        st.dataframe(
+            carteira[colunas_exibicao],
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "ativo": st.column_config.TextColumn("Ativo"),
+                "quantidade_total": st.column_config.NumberColumn("Qtd Total", format="%d"),
+                "preco_medio": st.column_config.NumberColumn("Preço Médio", format="R$ %.2f"),
+                "preco_atual": st.column_config.NumberColumn("Cotação Atual", format="R$ %.2f"),
+                "MM200": st.column_config.NumberColumn("Média 200d", format="R$ %.2f"),
+                "Min_52S": st.column_config.NumberColumn("Mín (52 sem)", format="R$ %.2f"),
+                "Max_52S": st.column_config.NumberColumn("Máx (52 sem)", format="R$ %.2f"),
+                "lucro_prejuizo": st.column_config.NumberColumn("Lucro/Prejuízo", format="R$ %.2f"),
+                "rentabilidade_%": st.column_config.NumberColumn("Retorno (%)", format="%.2f%%")
+            }
+        )
 
         # ====================================================================
         # 7 e 8. RESUMO GLOBAL, TERMÔMETRO E MAPA DE CALOR
@@ -200,9 +223,13 @@ if arquivo_usuario is not None:
         st.divider()
         st.subheader("🗺️ Mapa de Calor da Carteira (Heatmap)")
 
+        # Cálculo da variação em Reais para o hover
+        # (Patrimônio Atual * Porcentagem de Variação) / 100
+        carteira['var_dia_reais'] = (carteira['valor_patrimonio_atual'] * (carteira['var_dia_pct'] / 100))
+        
         carteira['var_dia_pct'] = carteira['var_dia_pct'].fillna(0.0)
         
-        # Tamanho dinâmico mas conservador para evitar quebras no motor do Plotly
+        # Tamanho dinâmico seguro (limite de 22px para não quebrar o layout)
         carteira['font_size'] = (14 + carteira['var_dia_pct'].abs() * 2).clip(upper=22)
 
         fig_tree = px.treemap(
@@ -212,22 +239,35 @@ if arquivo_usuario is not None:
             color='var_dia_pct', 
             color_continuous_scale='RdYlGn',
             color_continuous_midpoint=0,
-            custom_data=['var_dia_pct', 'font_size'] 
+            # Passamos a Variação em %, Tamanho da Fonte e Variação em R$
+            custom_data=['var_dia_pct', 'font_size', 'var_dia_reais'],
+            # TROCA O NOME NO TERMÔMETRO:
+            labels={'var_dia_pct': 'Desempenho Hoje (%)'} 
         )
 
         fig_tree.update_traces(
             textposition="middle center",
-            # Sem DIVs, apenas SPANs simples que o Plotly entende bem
+            # Texto exibido no quadrado (limpo)
             texttemplate=(
                 "<span style='font-size:%{customdata[1]}px'><b>%{label}</b></span><br>"
                 "<span style='font-size:%{customdata[1]}px'>%{customdata[0]:.2f}%</span>"
             ),
-            hovertemplate="<b>%{label}</b><br>Variação: %{customdata[0]:.2f}%<extra></extra>"
+            # BALÃO DE INFORMAÇÕES (HOVER) PERSONALIZADO
+            hovertemplate=(
+                "<b>%{label}</b><br><br>"
+                "Patrimônio: R$ %{value:,.2f}<br>"
+                "Variação (%): %{customdata[0]:.2f}%<br>"
+                "Variação (R$): <b>R$ %{customdata[2]:.2f}</b>"
+                "<extra></extra>"
+            )
         )
         
-        fig_tree.update_layout(margin=dict(t=10, l=10, r=10, b=10))
+        fig_tree.update_layout(
+            margin=dict(t=30, l=10, r=10, b=10),
+            coloraxis_colorbar=dict(title="Oscilação do Dia") # Nome amigável no topo do termômetro
+        )
+        
         st.plotly_chart(fig_tree, use_container_width=True)
-
         # 8. Gráfico de Pizza (Distribuição)
         st.divider()
         st.subheader("🍕 Distribuição da Carteira")
@@ -245,56 +285,86 @@ if arquivo_usuario is not None:
 
         st.plotly_chart(fig, use_container_width=True)
 
-        # 9. Máquina do Tempo: Comparação com Ibovespa (Últimos 12 meses)
+        # ====================================================================
+        # ====================================================================
+        # ====================================================================
+        # 7. COMPARATIVO DE DESEMPENHO (FIX DE CONTRASTE E LEITURA)
+        # ====================================================================
         st.divider()
-        st.subheader("📈 Máquina do Tempo: Carteira vs Ibovespa (1 Ano)")
-        st.write("Esta simulação compara o rendimento da sua composição de carteira atual contra o índice Bovespa nos últimos 12 meses.")
+        st.subheader("📈 Desempenho Acumulado: Carteira vs. Benchmarks")
 
-        # Cria uma animação de carregamento enquanto o Python vai à internet baixar o histórico
-        with st.spinner("A baixar histórico de 12 meses. Aguarde..."):
+        with st.spinner("Sincronizando dados e benchmarks..."):
+            # Lógica de segurança para a data inicial
+            try:
+                # Tenta usar a data do seu dataframe (ajuste 'df' se o nome for outro)
+                data_inicial = pd.to_datetime(df['data_pregao']).min().strftime('%Y-%m-%d')
+            except:
+                data_inicial = (pd.Timestamp.now() - pd.DateOffset(years=1)).strftime('%Y-%m-%d')
             
-            # Pegar a lista de ações que você tem hoje e adicionar o Ibovespa (^BVSP)
-            tickers_carteira = carteira['ativo'].tolist()
-            tickers_hist = tickers_carteira + ['^BVSP']
+            tickers_list = carteira['ativo'].tolist()
+            dados_h = yf.download(tickers_list + ['^BVSP'], start=data_inicial, progress=False)['Close']
+            dados_h = dados_h.ffill()
 
-            # Baixar o histórico de fechamento de 1 ano de todos eles de uma vez
-            # suppress_warnings evita que mensagens sujem o terminal
-            dados_hist = yf.download(tickers_hist, period="1y", progress=False)['Close']
+            # Busca CDI
+            try:
+                url_cdi = f"https://api.bcb.gov.br/dados/serie/bcdata.sgs.12/dados?formato=json&dataInicial={pd.to_datetime(data_inicial).strftime('%d/%m/%Y')}&dataFinal={pd.Timestamp.now().strftime('%d/%m/%Y')}"
+                df_cdi_raw = pd.read_json(url_cdi)
+                df_cdi_raw['data'] = pd.to_datetime(df_cdi_raw['data'], dayfirst=True)
+                df_cdi_raw.set_index('data', inplace=True)
+                retorno_cdi_acum = ((1 + df_cdi_raw['valor'] / 100).cumprod() - 1) * 100
+            except:
+                retorno_cdi_acum = pd.Series(0, index=dados_h.index)
 
-            # Preencher eventuais buracos nos dados (como feriados que uma ação negociou e outra não)
-            dados_hist.ffill(inplace=True)
-
-            # A Magia da Normalização: Faz todo mundo começar do 0% no primeiro dia do gráfico
-            retornos_acumulados = (dados_hist / dados_hist.iloc[0]) - 1
-
-            # Calcular o peso de cada ação no seu patrimônio atual
-            pesos = carteira.set_index('ativo')['valor_patrimonio_atual'] / carteira['valor_patrimonio_atual'].sum()
-
-            # Multiplicar o retorno histórico de cada ação pelo peso que ela tem na sua carteira
-            # Isso cria uma "Linha da sua Carteira" perfeitamente balanceada
-            retorno_carteira = (retornos_acumulados[tickers_carteira] * pesos).sum(axis=1)
-
-            # Juntar a sua linha com a linha do Ibovespa numa tabela nova para o gráfico
-            df_grafico = pd.DataFrame({
-                'A Minha Carteira': retorno_carteira * 100, # x100 para virar porcentagem
-                'Ibovespa': retornos_acumulados['^BVSP'] * 100
-            })
-
-            # Criar o gráfico de linhas com o Plotly
-            fig_linha = px.line(
-                df_grafico, 
-                labels={'value': 'Rentabilidade Acumulada (%)', 'Date': 'Data', 'variable': 'Comparativo'},
-                color_discrete_map={'A Minha Carteira': '#1f77b4', 'Ibovespa': '#d62728'} # Azul para você, Vermelho para IBOV
-            )
+            # Cálculos de Retorno
+            ret_ativos = (dados_h / dados_h.iloc[0]) - 1
+            pesos = carteira.set_index('ativo')['valor_patrimonio_atual'] / patrimonio_atual
             
-            # Formatação elegante para o gráfico
-            fig_linha.update_layout(
-                hovermode="x unified", # Mostra uma linha vertical acompanhando o mouse com os dois valores
-                yaxis_ticksuffix="%"   # Adiciona o símbolo de porcentagem no eixo Y
+            df_comp = pd.DataFrame({
+                'Minha Carteira': (ret_ativos[tickers_list] * pesos).sum(axis=1) * 100,
+                'Ibovespa': ret_ativos['^BVSP'] * 100,
+                'CDI': retorno_cdi_acum
+            }).ffill().fillna(0)
+
+            # --- CRIAÇÃO DO GRÁFICO COM FOCO EM CONTRASTE ---
+            fig_comp = px.line(
+                df_comp,
+                color_discrete_map={
+                    'Minha Carteira': '#00CC96', # Verde Vibrante
+                    'Ibovespa': '#EF553B',       # Vermelho Intenso
+                    'CDI': '#FFA500'            # Laranja Seguro
+                }
             )
 
-            # Desenhar o gráfico na tela
-            st.plotly_chart(fig_linha, use_container_width=True)
+            # 1. REMOVE NOMES FEIOS E ARREDONDA
+            fig_comp.update_traces(
+                line=dict(width=3),
+                hovertemplate="<b>%{fullData.name}</b>: %{y:.2f}%<extra></extra>"
+            )
+
+            # 2. CONFIGURAÇÃO DE CONTRASTE DO BALÃO (HOVER)
+            fig_comp.update_layout(
+                hovermode="x unified",
+                xaxis_title="",
+                yaxis_title="Retorno Acumulado (%)",
+                yaxis_ticksuffix="%",
+                legend=dict(title="", orientation="h", y=1.05, x=1, xanchor="right"),
+                
+                # A SOLUÇÃO DO CONTRASTE:
+                hoverlabel=dict(
+                    bgcolor="rgba(33, 33, 33, 1)", # Fundo Preto Sólido (Estilo Terminal)
+                    font_size=14,
+                    font_color="white",            # Texto sempre Branco
+                    font_family="Arial",
+                    bordercolor="#555"             # Borda discreta
+                ),
+                
+                # Deixa o gráfico limpo e sem bordas desnecessárias
+                margin=dict(l=10, r=10, t=40, b=10),
+                plot_bgcolor="rgba(0,0,0,0)",
+                paper_bgcolor="rgba(0,0,0,0)"
+            )
+
+            st.plotly_chart(fig_comp, use_container_width=True)
 
             # ====================================================================
         # 10. REBALANCEAMENTO INTELIGENTE DA CARTEIRA
@@ -532,6 +602,101 @@ if arquivo_usuario is not None:
                 st.error("Não foi possível carregar as notícias agora. O servidor do Yahoo pode estar sobrecarregado ou mudou a estrutura.")
 
                 # ====================================================================
+       # ====================================================================
+        # 15. TESTE DE STRESS: CENÁRIOS DE CRISE HISTÓRICOS
+        # ====================================================================
+        st.divider()
+        st.subheader("🛡️ Teste de Stress: Como a sua carteira reagiria a grandes crises?")
+        st.write("Simulamos o desempenho dos seus ativos atuais durante os períodos mais negros da nossa bolsa.")
+
+        cenarios = {
+            "Joesley Day (Maio 2017)": "2017-05-15",
+            "Greve dos Caminhoneiros (Maio 2018)": "2018-05-18",
+            "Início da Pandemia (Março 2020)": "2020-03-02"
+        }
+
+        escolha_crise = st.selectbox("Escolha o cenário de crise para simular:", list(cenarios.keys()))
+        data_inicio = cenarios[escolha_crise]
+        data_fim = (pd.to_datetime(data_inicio) + pd.DateOffset(days=30)).strftime('%Y-%m-%d')
+
+        if st.button("🚨 Iniciar Simulação de Crise"):
+            with st.spinner(f"Viajando no tempo para {escolha_crise}..."):
+                tickers_stress = carteira['ativo'].tolist()
+                
+                # Baixar dados do período da crise + Ibovespa
+                dados_crise = yf.download(tickers_stress + ['^BVSP'], start=data_inicio, end=data_fim, progress=False)['Close']
+                dados_crise.ffill(inplace=True)
+
+                if len(dados_crise) < 5:
+                    st.error("Dados insuficientes para este período. Alguns ativos podem ser muito recentes (IPOs).")
+                else:
+                    # 1. Identificar quais ativos já existiam na época
+                    ativos_validos = [t for t in tickers_stress if t in dados_crise.columns and not dados_crise[t].isnull().all()]
+                    
+                    # 2. Recalcular pesos apenas para os ativos que existiam
+                    valor_total_existente = carteira[carteira['ativo'].isin(ativos_validos)]['valor_patrimonio_atual'].sum()
+                    pesos_stress = carteira[carteira['ativo'].isin(ativos_validos)].set_index('ativo')['valor_patrimonio_atual'] / valor_total_existente
+
+                    # 3. Normalizar dados (Base 0%)
+                    retornos_crise = (dados_crise / dados_crise.iloc[0]) - 1
+                    
+                    # 4. Calcular desempenho da carteira e do Ibovespa
+                    desempenho_carteira = (retornos_crise[ativos_validos] * pesos_stress).sum(axis=1) * 100
+                    desempenho_ibov = retornos_crise['^BVSP'] * 100
+
+                    df_stress = pd.DataFrame({
+                        'A Minha Carteira': desempenho_carteira,
+                        'Ibovespa': desempenho_ibov
+                    })
+
+                    # 5. Gráfico de Stress com Contraste Garantido
+                    fig_stress = px.line(
+                        df_stress, 
+                        title=f"Impacto na Carteira: {escolha_crise}",
+                        labels={'value': 'Variação (%)', 'Date': 'Data', 'variable': 'Série'},
+                        color_discrete_map={
+                            'A Minha Carteira': '#00CC96', # Verde Esmeralda
+                            'Ibovespa': '#EF553B'          # Vermelho Coral
+                        }
+                    )
+
+                    fig_stress.update_traces(
+                        line=dict(width=3), # Linhas um pouco mais grossas para facilitar a visão
+                        hovertemplate="<b>%{fullData.name}</b><br>Data: %{x|%d/%m/%Y}<br>Variação: <b>%{y:.2f}%</b><extra></extra>"
+                    )
+
+                    fig_stress.update_layout(
+                        hovermode="x unified",
+                        # Melhorando o contraste da legenda e eixos
+                        legend=dict(font=dict(size=12, color="gray")),
+                        xaxis=dict(showgrid=False, title_font=dict(color="gray")),
+                        yaxis=dict(ticksuffix="%", title_font=dict(color="gray")),
+                        
+                        # A MÁGICA DO CONTRASTE: 
+                        # Forçamos um fundo semi-transparente escuro com letra branca no balão
+                        hoverlabel=dict(
+                            bgcolor="rgba(33, 33, 33, 0.9)", # Cinza escuro profissional
+                            font_size=14,
+                            font_color="white",             # Letra obrigatoriamente branca
+                            font_family="sans-serif"
+                        ),
+                        plot_bgcolor="rgba(0,0,0,0)", # Fundo do gráfico transparente
+                        paper_bgcolor="rgba(0,0,0,0)"
+                    )
+
+                    st.plotly_chart(fig_stress, use_container_width=True)
+
+                    # --- RESUMO FINANCEIRO DO SUSTO ---
+                    queda_max = df_stress['A Minha Carteira'].min()
+                    perda_financeira = (queda_max / 100) * patrimonio_atual
+                    
+                    st.error(f"⚠️ **Ponto Crítico:** No pior momento desta crise, a sua carteira teria caído **{queda_max:.2f}%**.")
+                    st.warning(f"💸 Em valores de hoje, isso representaria uma queda de aproximadamente **R$ {abs(perda_financeira):,.2f}** no seu património em poucos dias.")
+                    
+                    if len(ativos_validos) < len(tickers_stress):
+                        ativos_novos = set(tickers_stress) - set(ativos_validos)
+                        st.info(f"Nota: Ativos como {', '.join(ativos_novos)} não existiam nesta época e foram excluídos da simulação.")
+       
        # 9. Monte Carlo (Versão Final com Aporte e Hover Corrigido)
         st.divider()
         st.subheader("🎲 Simulação de Monte Carlo")
@@ -597,6 +762,228 @@ if arquivo_usuario is not None:
                 # Exibir resultado final esperado
                 valor_final = df_stats['Mediana'].iloc[-1]
                 st.success(f"📈 No cenário mais provável (Mediana), teria **R$ {valor_final:,.2f}** daqui a {anos} anos.")
+
+                # ====================================================================
+        # ====================================================================
+        # ====================================================================
+        # 13. VALUATION PRO: PREÇO JUSTO (BAZIN REAL & GRAHAM)
+        # ====================================================================
+        st.divider()
+        st.subheader("💎 Valuation Real: Graham & Bazin (Últimos 12 Meses)")
+        st.write("Calculando dividendos reais pagos nos últimos 12 meses para evitar erros de API.")
+
+        yield_desejado = st.slider("Yield Mínimo Desejado (Bazin) %:", 4.0, 12.0, 6.0) / 100
+
+        if st.button("🔍 Calcular Valuation com Dividendos Reais"):
+            with st.spinner("Analisando histórico de proventos e lucros..."):
+                valuation_list = []
+                for ativo in carteira['ativo']:
+                    try:
+                        ticker = yf.Ticker(ativo)
+                        
+                        # 1. Puxar preço atual de forma segura
+                        preco_atual = ticker.fast_info['lastPrice']
+                        
+                        # 2. CALCULAR DIVIDENDOS REAIS (BAZIN)
+                        # Em vez de ler 'yield', vamos somar os dividendos pagos nos últimos 365 dias
+                        historico_divs = ticker.dividends
+                        if not historico_divs.empty:
+                            data_corte = pd.Timestamp.now(tz=historico_divs.index.tz) - pd.DateOffset(years=1)
+                            div_anual_real = historico_divs[historico_divs.index >= data_corte].sum()
+                        else:
+                            div_anual_real = 0
+
+                        # 3. DADOS PARA GRAHAM
+                        info = ticker.info
+                        lpa = info.get('trailingEps') 
+                        vpa = info.get('bookValue')
+
+                        # --- CÁLCULOS MATEMÁTICOS ---
+                        # Bazin: Preço Teto = Dividendo Real / Yield Desejado
+                        preco_bazin = div_anual_real / yield_desejado if div_anual_real > 0 else np.nan
+                        
+                        # Graham: V = sqrt(22.5 * LPA * VPA)
+                        preco_graham = np.nan
+                        margem_graham = np.nan
+                        if lpa and vpa and lpa > 0 and vpa > 0:
+                            preco_graham = np.sqrt(22.5 * lpa * vpa)
+                            margem_graham = ((preco_graham / preco_atual) - 1) * 100
+
+                        valuation_list.append({
+                            'Ativo': ativo,
+                            'Preço Atual': preco_atual,
+                            'Div. 12M (R$)': div_anual_real,
+                            'P. Teto (Bazin)': preco_bazin,
+                            'P. Justo (Graham)': preco_graham,
+                            'Margem Graham (%)': margem_graham,
+                            'Status Bazin': "✅ Comprar" if preco_atual < preco_bazin else "❌ Caro"
+                        })
+                    except Exception as e:
+                        continue
+
+                df_val = pd.DataFrame(valuation_list)
+                
+                # Exibição com formatação rigorosa
+                st.dataframe(
+                    df_val.style.format({
+                        'Preço Atual': 'R$ {:,.2f}',
+                        'Div. 12M (R$)': 'R$ {:,.2f}',
+                        'P. Teto (Bazin)': lambda x: f"R$ {x:,.2f}" if pd.notnull(x) else "N/A",
+                        'P. Justo (Graham)': lambda x: f"R$ {x:,.2f}" if pd.notnull(x) else "N/A",
+                        'Margem Graham (%)': lambda x: f"{x:.2f}%" if pd.notnull(x) else "N/A"
+                    }),
+                    use_container_width=True, hide_index=True
+                )
+
+                # ====================================================================
+        # 14. MATRIZ DE CORRELAÇÃO: DIVERSIFICAÇÃO REAL
+        # ====================================================================
+        st.divider()
+        st.subheader("📊 Matriz de Correlação: Você está realmente diversificado?")
+        st.write("Esta matriz mostra como os seus ativos se movem em relação uns aos outros. Cores muito fortes indicam que você tem ativos que se comportam de forma quase idêntica.")
+
+        if st.button("🧬 Gerar Matriz de Risco"):
+            with st.spinner("Analisando padrões de movimento dos últimos 12 meses..."):
+                # 1. Baixar dados históricos de fechamento
+                tickers_corr = carteira['ativo'].tolist()
+                dados_corr = yf.download(tickers_corr, period="1y", progress=False)['Close']
+                
+                # 2. Calcular retornos diários
+                retornos_diarios = dados_corr.pct_change().dropna()
+                
+                # 3. Calcular a Matriz de Correlação de Pearson
+                matriz_corr = retornos_diarios.corr()
+
+                # 4. Criar o Mapa de Calor com Plotly
+                fig_corr = px.imshow(
+                    matriz_corr,
+                    text_auto=".2f", # Mostra o número dentro do quadrado
+                    aspect="auto",
+                    color_continuous_scale='RdBu_r', # Escala Red-Blue (Invertida)
+                    zmin=-1, zmax=1, # Fixa a escala entre -1 e 1
+                    title="Correlação entre Ativos (Pearson $r$)"
+                )
+
+                # Ajuste de layout para legibilidade
+                fig_corr.update_layout(
+                    width=800,
+                    height=700,
+                    xaxis_title="Ativos",
+                    yaxis_title="Ativos"
+                )
+
+                st.plotly_chart(fig_corr, use_container_width=True)
+
+                # --- INSIGHTS DE RISCO ---
+                st.info("💡 **Como ler esta matriz:**")
+                col_i1, col_i2 = st.columns(2)
+                with col_i1:
+                    st.markdown("""
+                    🔴 **Zonas Vermelhas (> 0.7):** Alta dependência. 
+                    Se você tem muitos quadrados vermelhos (além da diagonal principal), 
+                    sua carteira pode cair toda de uma vez. Ex: Dois bancos ou duas empresas de commodities.
+                    """)
+                with col_i2:
+                    st.markdown("""
+                    🔵 **Zonas Azuis (< 0.3):** Ótima diversificação. 
+                    Estes ativos reagem de forma diferente aos estímulos do mercado. 
+                    É isso que protege o seu patrimônio em crises setoriais.
+                    """)
+
+                    # ====================================================================
+        # 16. AGENDA DE DIVIDENDOS: DINHEIRO NO BOLSO (CASH FLOW)
+        # ====================================================================
+        st.divider()
+        st.subheader("📅 Próximos Dividendos e JCP")
+        st.write("Acompanhe os anúncios de pagamentos e datas de corte (Data Com) da sua carteira.")
+
+        if st.button("🚀 Consultar Agenda de Proventos"):
+            with st.spinner("Consultando editais de pagamento..."):
+                agenda_list = []
+                for ativo in carteira['ativo']:
+                    try:
+                        t = yf.Ticker(ativo)
+                        # O 'calendar' do yfinance traz as próximas datas importantes
+                        cal = t.calendar
+                        
+                        if 'Dividend Date' in cal:
+                            data_pagamento = cal['Dividend Date']
+                            # Se houver data, vamos registrar
+                            if pd.notnull(data_pagamento):
+                                agenda_list.append({
+                                    'Ativo': ativo,
+                                    'Previsão de Pagamento': data_pagamento.strftime('%d/%m/%Y'),
+                                    'Tipo': 'Dividendo/JCP',
+                                    'Status': 'Anunciado'
+                                })
+                    except:
+                        continue
+
+                if agenda_list:
+                    df_agenda = pd.DataFrame(agenda_list)
+                    st.success("✅ Novos pagamentos identificados!")
+                    st.dataframe(df_agenda, use_container_width=True, hide_index=True)
+                else:
+                    st.info("Nenhum novo pagamento anunciado nos editais recentes para os seus ativos.")
+
+        st.caption("Nota: As datas são baseadas nas últimas divulgações oficiais capturadas pelo Yahoo Finance.")
+
+        # ====================================================================
+        # 17. MACRO: SENSIBILIDADE AO DÓLAR (USD/BRL)
+        # ====================================================================
+        st.divider()
+        st.subheader("🌎 Análise Macro: Proteção Cambial (Dólar vs. Carteira)")
+        st.write("Descubra se o seu patrimônio está protegido contra a alta do dólar ou se ele é dependente da economia local.")
+
+        if st.button("💵 Analisar Exposição ao Dólar"):
+            with st.spinner("Cruzando dados com o mercado de câmbio..."):
+                # 1. Baixar dados do Dólar e da Carteira (1 ano)
+                tickers_macro = carteira['ativo'].tolist()
+                dados_macro = yf.download(tickers_macro + ['USDBRL=X'], period="1y", progress=False)['Close']
+                dados_macro.ffill(inplace=True)
+
+                # 2. Calcular retornos
+                retornos_macro = dados_macro.pct_change().dropna()
+                
+                # Pesos para o retorno da carteira
+                pesos_macro = carteira.set_index('ativo')['valor_patrimonio_atual'] / patrimonio_atual
+                retornos_macro['Minha Carteira'] = (retornos_macro[tickers_list] * pesos_macro).sum(axis=1)
+
+                # 3. Calcular Correlação de Pearson
+                correl_dolar = retornos_macro['Minha Carteira'].corr(retornos_macro['USDBRL=X'])
+
+                # 4. Exibição Visual (Gauge ou Métrica)
+                col_m1, col_m2 = st.columns([1, 2])
+                
+                with col_m1:
+                    st.metric("Correlação com USD", f"{correl_dolar:.2f}")
+                
+                with col_m2:
+                    if correl_dolar > 0.3:
+                        st.success("✅ **Carteira Dolarizada:** Seus ativos tendem a subir junto com o dólar. Ótima proteção cambial (Exportadoras/Commodities).")
+                    elif correl_dolar < -0.3:
+                        st.warning("⚠️ **Foco em Mercado Interno:** Sua carteira costuma cair quando o dólar sobe. Atenção a crises cambiais.")
+                    else:
+                        st.info("⚖️ **Neutro:** Sua carteira não tem relação direta com o câmbio. Movimentos do dólar afetam pouco o seu resultado final.")
+
+                # Gráfico de Dispersão (Visualização Premium)
+                fig_macro = px.scatter(
+                    retornos_macro, 
+                    x='USDBRL=X', 
+                    y='Minha Carteira',
+                    trendline="ols",
+                    title="Dispersão: Retorno Carteira vs. Variação Dólar",
+                    labels={'USDBRL=X': 'Variação Dólar (%)', 'Minha Carteira': 'Variação Carteira (%)'}
+                )
+                
+                # Formatação fluida do hover
+                fig_macro.update_traces(
+                    marker=dict(size=10, color='#00CC96', opacity=0.6),
+                    hovertemplate="Dólar: %{x:.2f}%<br>Carteira: %{y:.2f}%<extra></extra>"
+                )
+                
+                st.plotly_chart(fig_macro, use_container_width=True)
+
     except Exception as e:
         st.error(f"Ocorreu um erro ao processar o ficheiro. Verifique se é o Excel correto da B3. Erro detalhado: {e}")
 
