@@ -4,6 +4,11 @@ import yfinance as yf
 import plotly.express as px
 import numpy as np
 import requests
+import json
+import urllib.request
+import os  
+from datetime import date
+import openpyxl
 
 # ==========================================
 # 🛡️ BLINDAGEM CONTRA ERRO DE ESTATÍSTICA
@@ -14,8 +19,6 @@ try:
 except ImportError:
     TEM_STATSMODELS = False
 
-# ==========================================
-# ==========================================
 # ==========================================
 # 1. CONFIGURAÇÃO DA PÁGINA E CSS (UI/UX PREMIUM)
 # ==========================================
@@ -134,7 +137,6 @@ def obter_preco_atual(ticker):
         try:
             dados = yf.download(ticker, period="1d", progress=False)['Close']
             if not dados.empty:
-                # Se for um DataFrame (versões novas do yfinance), pega a primeira coluna
                 if isinstance(dados, pd.DataFrame):
                     return float(dados.iloc[-1, 0])
                 else:
@@ -146,15 +148,6 @@ def obter_preco_atual(ticker):
         pass
         
     return 0.0
-
-import json
-import urllib.request
-
-import json
-import urllib.request
-
-import json
-import urllib.request
 
 @st.cache_data(ttl=300, show_spinner=False)
 def obter_preco_cripto(ticker):
@@ -195,6 +188,27 @@ def obter_dividendos(ticker):
     except:
         return pd.Series()
 
+def salvar_historico(total_global, b3, fixa, cripto):
+    arquivo = "historico_patrimonio.csv"
+    hoje = date.today().strftime("%Y-%m-%d")
+    
+    # Criar o DataFrame com os dados de hoje
+    novo_dado = pd.DataFrame([[hoje, total_global, b3, fixa, cripto]], 
+                             columns=['Data', 'Total', 'B3', 'Renda Fixa', 'Cripto'])
+    
+    if not os.path.exists(arquivo):
+        # Se o arquivo não existe, cria um novo
+        novo_dado.to_csv(arquivo, index=False)
+    else:
+        df_hist = pd.read_csv(arquivo)
+        # Só adiciona se a data de hoje ainda não estiver lá
+        if hoje not in df_hist['Data'].values:
+            df_hist = pd.concat([df_hist, novo_dado], ignore_index=True)
+            df_hist.to_csv(arquivo, index=False)
+    
+    return pd.read_csv(arquivo)
+
+# ==========================================
 # ==========================================
 # 2. MENU LATERAL (SIDEBAR)
 # ==========================================
@@ -203,210 +217,224 @@ with st.sidebar:
     st.markdown("Bem-vindo ao seu terminal de investimentos inteligente.")
     st.divider()
     st.subheader("📁 1. Carregar Dados")
-    arquivo_usuario = st.file_uploader("Upload do Excel da B3", type=['xlsx'])
-    st.divider()
-    
-    # --- NOVO BLOCO: ATIVOS EXTERNOS ---
-    st.subheader("🏦 2. Ativos Externos")
-    st.write("Adicione patrimônio que não está na B3.")
-    
-    # Renda Fixa (Tesouro, CDBs, Reserva)
-    st.markdown("**Segurança & Reserva**")
-    saldo_renda_fixa = st.number_input("Saldo Renda Fixa (R$):", min_value=0.0, value=0.0, step=1000.0)
-    
-    # Criptomoedas
-    st.markdown("**Criptomoedas**")
-    st.caption("Insira o Ticker do Yahoo (ex: BTC-BRL, ETH-BRL) e a quantidade de moedas.")
-    
-    df_cripto_base = pd.DataFrame({
-        "Ativo Cripto": ["BTC-BRL", "ETH-BRL"], 
-        "Quantidade": [0.0, 0.0]
-    })
-    
-    criptos_editadas = st.data_editor(
-        df_cripto_base, 
-        num_rows="dynamic", 
-        use_container_width=True,
-        hide_index=True
-    )
-    
+    st.markdown("Faça o upload do seu ficheiro Excel com as abas **B3**, **Cripto** e **Renda Fixa**.")
+    arquivo_usuario = st.file_uploader("Upload do Excel de Investimentos", type=['xlsx'])
     st.divider()
     st.caption("Terminal desenvolvido com Inteligência de Dados e Análise Quantitativa.")
-    
 
 # Área principal de título
 if arquivo_usuario is None:
-    st.title("O Seu Terminal de Investimentos B3")
-    st.info("👈 Por favor, carregue o seu ficheiro Excel da B3 no menu lateral para inicializar o sistema.")
+    st.title("O Seu Terminal de Investimentos")
+    st.info("👈 Por favor, carregue o seu ficheiro Excel (com as abas B3, Cripto e Renda Fixa) no menu lateral para inicializar o sistema.")
     st.stop() # Para a execução aqui até que o arquivo seja carregado
 
+# ==========================================
+# ==========================================
 # ==========================================
 # 4. LÓGICA PRINCIPAL E CÁLCULOS GERAIS
 # ==========================================
 try:
-    with st.spinner("A processar e cruzar os seus dados com a B3..."):
-        df_b3 = pd.read_excel(arquivo_usuario)
-        df_b3.columns = df_b3.columns.str.lower().str.strip()
-        df_b3['ativo_limpo'] = df_b3['ativo'].astype(str).str.split(' -').str[0].str.strip() + '.SA'
+    with st.spinner("A processar e cruzar os seus dados..."):
+        # --- LER O EXCEL ---
+        xls = pd.ExcelFile(arquivo_usuario)
+        abas_disponiveis = [aba.strip().lower() for aba in xls.sheet_names]
         
-        def ajustar_quantidade(linha):
-            direcao = str(linha['entrada/saída']).strip().lower()
-            if direcao in ['credito', 'entrada', 'c']:
-                return linha['quantidade']
-            elif direcao in ['debito', 'saída', 'saida', 'd']:
-                return -linha['quantidade']
-            return 0
+        # INICIALIZAÇÃO DE VARIÁVEIS DE SEGURANÇA (Para evitar erros 'not defined')
+        patrimonio_b3 = 0.0
+        patrimonio_atual = 0.0 # <--- A VARIÁVEL QUE ESTAVA FALTANDO!
+        investido_b3 = 0.0
+        lucro_b3_reais = 0.0
+        rentabilidade_b3_pct = 0.0
+        variacao_percentual_dia = 0.0
+        
+        valor_criptos_total = 0.0
+        investido_criptos_total = 0.0 
+        df_cripto = pd.DataFrame()
+        
+        saldo_renda_fixa = 0.0
+        df_rf = pd.DataFrame()
+        
+        carteira = pd.DataFrame() # Caso não haja B3
 
-        df_b3['qtd_ajustada'] = df_b3.apply(ajustar_quantidade, axis=1)
-        
-        compras = df_b3[df_b3['qtd_ajustada'] > 0].copy()
-        compras['custo_transacao'] = compras['quantidade'] * compras['preço']
-        
-        custo_compras = compras.groupby('ativo_limpo').agg(qtd_comprada=('quantidade', 'sum'), valor_gasto=('custo_transacao', 'sum')).reset_index()
-        custo_compras['preco_medio'] = custo_compras['valor_gasto'] / custo_compras['qtd_comprada']
-        
-        posicao_atual = df_b3.groupby('ativo_limpo')['qtd_ajustada'].sum().reset_index()
-        posicao_atual = posicao_atual[posicao_atual['qtd_ajustada'] > 0]
-        
-        carteira = pd.merge(posicao_atual, custo_compras[['ativo_limpo', 'preco_medio']], on='ativo_limpo', how='left')
-        carteira.rename(columns={'ativo_limpo': 'ativo', 'qtd_ajustada': 'quantidade_total'}, inplace=True)
-        carteira['custo_total_investido'] = carteira['quantidade_total'] * carteira['preco_medio']
-
-        precos_atuais, valores_atuais_totais, lucros, lucros_percentuais, mm200_lista, max_52w_lista, min_52w_lista, tendencia_lista = [], [], [], [], [], [], [], []
-
-        for index, linha in carteira.iterrows():
-            try:
-                acao = yf.Ticker(linha['ativo'])
-                preco_hoje = acao.fast_info['lastPrice']
-                mm200 = acao.fast_info['twoHundredDayAverage']
-                max_52w = acao.fast_info['yearHigh']
-                min_52w = acao.fast_info['yearLow']
-            except:
-                preco_hoje, mm200, max_52w, min_52w = 0.0, 0.0, 0.0, 0.0
+        # --- 1. PROCESSAR ABA B3 ---
+        if 'b3' in abas_disponiveis:
+            nome_real_b3 = xls.sheet_names[abas_disponiveis.index('b3')]
+            df_b3 = pd.read_excel(xls, nome_real_b3)
+            df_b3.columns = df_b3.columns.str.lower().str.strip()
+            df_b3['ativo_limpo'] = df_b3['ativo'].astype(str).str.split(' -').str[0].str.strip() + '.SA'
             
-            valor_hoje_total = preco_hoje * linha['quantidade_total']
-            lucro_monetario = valor_hoje_total - linha['custo_total_investido']
-            lucro_percentual = (lucro_monetario / linha['custo_total_investido']) * 100 if linha['custo_total_investido'] > 0 else 0
-            
-            precos_atuais.append(preco_hoje)
-            valores_atuais_totais.append(valor_hoje_total)
-            lucros.append(lucro_monetario)
-            lucros_percentuais.append(lucro_percentual)
-            mm200_lista.append(mm200)
-            max_52w_lista.append(max_52w)
-            min_52w_lista.append(min_52w)
-            tendencia_lista.append("🟢 Alta (Acima MM200)" if preco_hoje > mm200 else "🔴 Baixa (Abaixo MM200)")
+            def ajustar_quantidade(linha):
+                direcao = str(linha['entrada/saída']).strip().lower()
+                if direcao in ['credito', 'entrada', 'c']:
+                    return linha['quantidade']
+                elif direcao in ['debito', 'saída', 'saida', 'd']:
+                    return -linha['quantidade']
+                return 0
 
-        carteira['preco_atual'] = precos_atuais
-        carteira['valor_patrimonio_atual'] = valores_atuais_totais
-        carteira['lucro_prejuizo'] = lucros
-        carteira['rentabilidade_%'] = lucros_percentuais
-        carteira['MM200'] = mm200_lista
-        carteira['Min_52S'] = min_52w_lista
-        carteira['Max_52S'] = max_52w_lista
-        carteira['Tendência'] = tendencia_lista
+            df_b3['qtd_ajustada'] = df_b3.apply(ajustar_quantidade, axis=1)
+            compras = df_b3[df_b3['qtd_ajustada'] > 0].copy()
+            compras['custo_transacao'] = compras['quantidade'] * compras['preço']
+            custo_compras = compras.groupby('ativo_limpo').agg(qtd_comprada=('quantidade', 'sum'), valor_gasto=('custo_transacao', 'sum')).reset_index()
+            custo_compras['preco_medio'] = custo_compras['valor_gasto'] / custo_compras['qtd_comprada']
+            posicao_atual = df_b3.groupby('ativo_limpo')['qtd_ajustada'].sum().reset_index()
+            posicao_atual = posicao_atual[posicao_atual['qtd_ajustada'] > 0]
+            carteira = pd.merge(posicao_atual, custo_compras[['ativo_limpo', 'preco_medio']], on='ativo_limpo', how='left')
+            carteira.rename(columns={'ativo_limpo': 'ativo', 'qtd_ajustada': 'quantidade_total'}, inplace=True)
+            carteira['custo_total_investido'] = carteira['quantidade_total'] * carteira['preco_medio']
 
-        patrimonio_investido = carteira['custo_total_investido'].sum()
-        patrimonio_atual = carteira['valor_patrimonio_atual'].sum()
-        lucro_global = patrimonio_atual - patrimonio_investido
-        rentabilidade_global = (lucro_global / patrimonio_investido) * 100 if patrimonio_investido > 0 else 0
-        
-        variacao_total_dia = 0.0
-        patrimonio_ontem = 0.0
-        variacoes_individuais_pct = [] 
+            precos_atuais, valores_atuais_totais, lucros, lucros_percentuais, mm200_lista, max_52w_lista, min_52w_lista, tendencia_lista = [], [], [], [], [], [], [], []
 
-        for ativo in carteira['ativo']:
-            try:
-                acao = yf.Ticker(ativo)
-                preco_atual = acao.fast_info['lastPrice']
-                preco_anterior = acao.fast_info['previousClose']
-                qtd = carteira.loc[carteira['ativo'] == ativo, 'quantidade_total'].values[0]
+            for index, linha in carteira.iterrows():
+                try:
+                    acao = yf.Ticker(linha['ativo'])
+                    p_info = acao.fast_info
+                    preco_hoje = p_info['lastPrice']
+                    mm200 = p_info['twoHundredDayAverage']
+                    max_52w = p_info['yearHigh']
+                    min_52w = p_info['yearLow']
+                except:
+                    preco_hoje, mm200, max_52w, min_52w = 0.0, 0.0, 0.0, 0.0
                 
-                variacao_total_dia += (preco_atual - preco_anterior) * qtd
-                patrimonio_ontem += preco_anterior * qtd
-                v_pct = ((preco_atual / preco_anterior) - 1) * 100
-                variacoes_individuais_pct.append(v_pct)
-            except:
-                variacoes_individuais_pct.append(0.0)
-        
-        variacao_percentual_dia = (variacao_total_dia / patrimonio_ontem) * 100 if patrimonio_ontem > 0 else 0
-        carteira['var_dia_pct'] = variacoes_individuais_pct
+                v_total = preco_hoje * linha['quantidade_total']
+                precos_atuais.append(preco_hoje)
+                valores_atuais_totais.append(v_total)
+                lucros.append(v_total - linha['custo_total_investido'])
+                lucros_percentuais.append(((v_total / linha['custo_total_investido']) - 1) * 100 if linha['custo_total_investido'] > 0 else 0)
+                mm200_lista.append(mm200); max_52w_lista.append(max_52w); min_52w_lista.append(min_52w)
+                tendencia_lista.append("🟢 Alta" if preco_hoje > mm200 else "🔴 Baixa")
+
+            carteira['preco_atual'] = precos_atuais
+            carteira['valor_patrimonio_atual'] = valores_atuais_totais
+            carteira['lucro_prejuizo'] = lucros
+            carteira['rentabilidade_%'] = lucros_percentuais
+            carteira['MM200'] = mm200_lista; carteira['Min_52S'] = min_52w_lista; carteira['Max_52S'] = max_52w_lista; carteira['Tendência'] = tendencia_lista
+            
+            patrimonio_b3 = carteira['valor_patrimonio_atual'].sum()
+            investido_b3 = carteira['custo_total_investido'].sum()
+            lucro_b3_reais = patrimonio_b3 - investido_b3
+            rentabilidade_b3_pct = (lucro_b3_reais / investido_b3 * 100) if investido_b3 > 0 else 0
+
+            # Variação do dia B3
+            variacao_total_dia, patrimonio_ontem = 0.0, 0.0
+            vars_pct = []
+            for ativo in carteira['ativo']:
+                try:
+                    tick = yf.Ticker(ativo).fast_info
+                    p_atual, p_ant = tick['lastPrice'], tick['previousClose']
+                    q = carteira.loc[carteira['ativo'] == ativo, 'quantidade_total'].values[0]
+                    variacao_total_dia += (p_atual - p_ant) * q
+                    patrimonio_ontem += p_ant * q
+                    vars_pct.append(((p_atual / p_ant) - 1) * 100)
+                except: vars_pct.append(0.0)
+            variacao_percentual_dia = (variacao_total_dia / patrimonio_ontem) * 100 if patrimonio_ontem > 0 else 0
+            carteira['var_dia_pct'] = vars_pct
+        else:
+            st.error("A aba 'B3' não foi encontrada. Crie uma aba chamada 'B3'.")
+            st.stop()
+
+        # --- 2. PROCESSAR ABA CRIPTO ---
+        if 'cripto' in abas_disponiveis:
+            nome_real_c = xls.sheet_names[abas_disponiveis.index('cripto')]
+            df_c_raw = pd.read_excel(xls, nome_real_c)
+            df_c_raw.columns = df_c_raw.columns.str.lower().str.strip()
+            
+            if not df_c_raw.empty and 'quantidade' in df_c_raw.columns:
+                # Cálculo de saldo e preço médio
+                df_c_raw['qtd_adj'] = df_c_raw.apply(lambda r: r['quantidade'] if str(r.get('entrada/saída', 'C')).strip().lower() in ['c','compra','entrada'] else -r['quantidade'], axis=1)
+                custo_c = df_c_raw[df_c_raw['qtd_adj'] > 0].copy()
+                custo_c['total_pago'] = custo_c['quantidade'] * custo_c.get('preço', 0)
+                grp_custo = custo_c.groupby('ativo cripto').agg(q=('quantidade','sum'), v=('total_pago','sum')).reset_index()
+                grp_custo['pm'] = np.where(grp_custo['q'] > 0, grp_custo['v'] / grp_custo['q'], 0)
+                
+                df_cripto = df_c_raw.groupby('ativo cripto')['qtd_adj'].sum().reset_index()
+                df_cripto = df_cripto[df_cripto['qtd_adj'] > 0]
+                df_cripto = pd.merge(df_cripto, grp_custo[['ativo cripto', 'pm']], on='ativo cripto', how='left')
+                df_cripto.columns = ['Ativo Cripto', 'Quantidade', 'Preço Médio']
+                
+                p_atuais, v_atuais = [], []
+                for _, row in df_cripto.iterrows():
+                    p = obter_preco_cripto(row['Ativo Cripto'])
+                    p_atuais.append(p)
+                    v_atual = p * row['Quantidade']
+                    v_atuais.append(v_atual)
+                    valor_criptos_total += v_atual
+                    investido_criptos_total += (row['Preço Médio'] * row['Quantidade'])
+                
+                df_cripto['Preço Atual (R$)'] = p_atuais
+                df_cripto['Valor Atual (R$)'] = v_atuais
+                df_cripto['Lucro/Prejuízo (R$)'] = df_cripto['Valor Atual (R$)'] - (df_cripto['Quantidade'] * df_cripto['Preço Médio'])
+                df_cripto['Rentabilidade (%)'] = np.where(
+                    (df_cripto['Quantidade'] * df_cripto['Preço Médio']) > 0, 
+                    (df_cripto['Lucro/Prejuízo (R$)'] / (df_cripto['Quantidade'] * df_cripto['Preço Médio'])) * 100, 
+                    0
+                )
+
+        # --- 3. PROCESSAR ABA RENDA FIXA ---
+        if 'renda fixa' in abas_disponiveis:
+            nome_real_rf = xls.sheet_names[abas_disponiveis.index('renda fixa')]
+            df_rf = pd.read_excel(xls, nome_real_rf)
+            df_rf.columns = df_rf.columns.str.strip()
+            if 'Valor Atual' in df_rf.columns:
+                saldo_renda_fixa = df_rf['Valor Atual'].sum()
 
     # ==========================================
-    # 🌟 SISTEMA DE NAVEGAÇÃO POR ABAS (TABS)
-    # ==========================================
-    st.title("Visão Geral do Patrimônio")
-    
-    # Renderiza os CARDS principais no topo (fora das abas, para estar sempre visível)
-    # ==========================================
-    # 🌟 VISÃO GLOBAL DE PATRIMÓNIO (B3 + Renda Fixa + Cripto)
+    # 🌟 PAINEL DE PERFORMANCE E PATRIMÔNIO
     # ==========================================
     st.title("Visão Global do Patrimônio")
     
-    # 1. Calcular o total de Criptomoedas buscando o preço em tempo real
-    valor_criptos_total = 0.0
-    with st.spinner("A verificar blockchain e cotações cripto..."):
-        for index, row in criptos_editadas.iterrows():
-            ativo_cripto = str(row['Ativo Cripto']).strip().upper()
-            qtd_cripto = float(row['Quantidade'])
-            
-            if qtd_cripto > 0 and ativo_cripto != "NAN" and ativo_cripto != "":
-                # Usa a nossa função com dupla verificação
-                preco_c = obter_preco_cripto(ativo_cripto)
-        
-                    # Se o preço vier zerado, avisa o utilizador na tela
-                if preco_c == 0.0:
-                    st.warning(f"⚠️ Sem sinal para **{ativo_cripto}**. Use apenas a sigla da moeda, como **BTC** ou **ETH**.")
-                
-                valor_criptos_total += (preco_c * qtd_cripto)
-
-    # 2. Somar o Grande Total
-    patrimonio_b3 = carteira['valor_patrimonio_atual'].sum()
+    # Soma Tudo (O Bolo Total)
     patrimonio_global_total = patrimonio_b3 + saldo_renda_fixa + valor_criptos_total
     
-    # 3. Exibir o Placar Principal
+    # Desenha os 4 cartões lado a lado
     col1, col2, col3, col4 = st.columns(4)
-    col1.metric("🌍 Património Global", f"R$ {patrimonio_global_total:,.2f}")
     
-    # Exibe a fatia da B3 com a rentabilidade diária acoplada
-    col2.metric("🏢 Ações & FIIs (B3)", f"R$ {patrimonio_b3:,.2f}", f"Hoje: {variacao_percentual_dia:.2f}%")
+    col1.metric("🌍 Patrimônio Total", f"R$ {patrimonio_global_total:,.2f}")
     
-    col3.metric("🛡️ Renda Fixa", f"R$ {saldo_renda_fixa:,.2f}")
-    col4.metric("₿ Criptomoedas", f"R$ {valor_criptos_total:,.2f}")
+    col2.metric(
+        "📈 Lucro/Prejuízo (B3)", 
+        f"R$ {lucro_b3_reais:,.2f}", 
+        f"{rentabilidade_b3_pct:.2f}%"
+    )
     
-    # Barra de progresso visual mostrando a distribuição do risco
+    col3.metric("🏦 Renda Fixa", f"R$ {saldo_renda_fixa:,.2f}")
+    
+    # Adicionando rentabilidade total das criptos se houver investimento
+    if investido_criptos_total > 0:
+        lucro_cripto_total = valor_criptos_total - investido_criptos_total
+        rentabilidade_cripto_pct = (lucro_cripto_total / investido_criptos_total) * 100
+        col4.metric("₿ Criptomoedas", f"R$ {valor_criptos_total:,.2f}", f"{rentabilidade_cripto_pct:.2f}%")
+    else:
+        col4.metric("₿ Criptomoedas", f"R$ {valor_criptos_total:,.2f}")
+    
+    # --- BARRA DE DISTRIBUIÇÃO (Visual) ---
     if patrimonio_global_total > 0:
         pct_b3 = (patrimonio_b3 / patrimonio_global_total) * 100
         pct_rf = (saldo_renda_fixa / patrimonio_global_total) * 100
         pct_cripto = (valor_criptos_total / patrimonio_global_total) * 100
         
         st.markdown(f"""
-        <div style='width: 100%; height: 8px; display: flex; border-radius: 4px; overflow: hidden; margin-top: 10px; margin-bottom: 20px;'>
-            <div style='width: {pct_b3}%; background-color: #00CC96;' title='B3: {pct_b3:.1f}%'></div>
-            <div style='width: {pct_rf}%; background-color: #FFA500;' title='Renda Fixa: {pct_rf:.1f}%'></div>
-            <div style='width: {pct_cripto}%; background-color: #9B59B6;' title='Criptomoedas: {pct_cripto:.1f}%'></div>
+        <div style='width: 100%; height: 12px; display: flex; border-radius: 6px; overflow: hidden; margin-top: 15px;'>
+            <div style='width: {pct_b3}%; background-color: #00CC96;' title='B3 (Ações/FIIs)'></div>
+            <div style='width: {pct_rf}%; background-color: #FFA500;' title='Renda Fixa'></div>
+            <div style='width: {pct_cripto}%; background-color: #9B59B6;' title='Criptomoedas'></div>
         </div>
-        <div style='display: flex; justify-content: space-between; font-size: 12px; color: gray;'>
-            <span>🟩 Variável: {pct_b3:.1f}%</span>
-            <span>🟧 Fixa: {pct_rf:.1f}%</span>
-            <span>🟪 Cripto: {pct_cripto:.1f}%</span>
+        <div style='display: flex; justify-content: space-between; font-size: 13px; color: #888; margin-top: 5px; margin-bottom: 20px;'>
+            <span>🟢 B3: {pct_b3:.1f}%</span>
+            <span>🟠 Renda Fixa: {pct_rf:.1f}%</span>
+            <span>🟣 Cripto: {pct_cripto:.1f}%</span>
         </div>
         """, unsafe_allow_html=True)
     
     st.write("") # Espaço em branco
-    
-    # Daqui para baixo começam as ABAS normais...
-    # tab1, tab2, tab3, tab4, tab5 = st.tabs([...])
-    
-    st.write("") # Espaço em branco
 
     # CRIA AS ABAS
-    tab1, tab2, tab3, tab4, tab5 = st.tabs([
+    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
         "📊 Visão Geral", 
         "💸 Renda Passiva", 
         "🛡️ Risco & Defesa", 
         "🧠 Inteligência de Mercado", 
-        "⚙️ Gestão & Exportação"
+        "⚙️ Gestão & Exportação",
+        "💎 Outros Ativos"  # Nova aba!
     ])
 
     # ==========================================
@@ -414,7 +442,7 @@ try:
     # ==========================================
     with tab1:
         with st.container(border=True):
-            st.subheader("📊 Posição Atual e Indicadores Técnicos")
+            st.subheader("📊 Posição Atual e Indicadores Técnicos (B3)")
             colunas_exibicao = ["ativo", "quantidade_total", "preco_medio", "preco_atual", "Tendência", "MM200", "Min_52S", "Max_52S", "lucro_prejuizo", "rentabilidade_%"]
             st.dataframe(
                 carteira[colunas_exibicao], use_container_width=True, hide_index=True,
@@ -430,7 +458,7 @@ try:
         col_t1, col_t2 = st.columns([2, 1])
         with col_t1:
             with st.container(border=True):
-                st.subheader("🗺️ Mapa de Calor (Desempenho Diário)")
+                st.subheader("🗺️ Mapa de Calor (Desempenho Diário B3)")
                 carteira['var_dia_reais'] = (carteira['valor_patrimonio_atual'] * (carteira['var_dia_pct'] / 100))
                 carteira['font_size'] = (14 + carteira['var_dia_pct'].abs() * 2).clip(upper=22)
                 fig_tree = px.treemap(
@@ -447,23 +475,40 @@ try:
 
         with col_t2:
             with st.container(border=True):
-                st.subheader("🍕 Distribuição")
-                fig_pie = px.pie(carteira, values='valor_patrimonio_atual', names='ativo', hole=0.4, color_discrete_sequence=px.colors.sequential.Teal)
+                st.subheader("🍕 Distribuição Global")
+                # Criando um DataFrame consolidado para o gráfico de pizza
+                pizza_data = []
+                for _, row in carteira.iterrows():
+                    pizza_data.append({'Ativo': row['ativo'], 'Valor': row['valor_patrimonio_atual'], 'Categoria': 'B3'})
+                if 'Cripto' in xls.sheet_names and not df_cripto.empty:
+                    for _, row in df_cripto.iterrows():
+                         pizza_data.append({'Ativo': row['Ativo Cripto'], 'Valor': row['Valor Atual (R$)'], 'Categoria': 'Cripto'})
+                if 'Renda Fixa' in xls.sheet_names and not df_rf.empty:
+                     for _, row in df_rf.iterrows():
+                         pizza_data.append({'Ativo': row['Ativo RF'], 'Valor': row['Valor Atual'], 'Categoria': 'Renda Fixa'})
+                
+                df_pizza = pd.DataFrame(pizza_data)
+                
+                fig_pie = px.pie(df_pizza, values='Valor', names='Ativo', hole=0.4, color_discrete_sequence=px.colors.sequential.Teal)
                 fig_pie.update_traces(textposition='inside', textinfo='percent+label', hovertemplate="%{label}<br>R$ %{value:,.2f}<br>%{percent}")
-                fig_pie.update_layout(showlegend=False) # Esconder legenda para ganhar espaço
+                fig_pie.update_layout(showlegend=False) 
                 fig_pie = padronizar_grafico(fig_pie)
                 st.plotly_chart(fig_pie, use_container_width=True, theme=None)
 
         with st.container(border=True):
             st.subheader("📈 Desempenho Acumulado: Carteira vs. Benchmarks")
             try:
+                # Usa a menor data de entrada do Excel como início do gráfico
                 data_inicial = pd.to_datetime(df_b3['data']).min().strftime('%Y-%m-%d')
             except:
+                # Se não houver data no Excel, puxa 1 ano para trás
                 data_inicial = (pd.Timestamp.now() - pd.DateOffset(years=1)).strftime('%Y-%m-%d')
             
+            # Puxar histórico de cotações
             tickers_list = carteira['ativo'].tolist()
             dados_h = carregar_dados_yfinance(tickers_list + ['^BVSP'], start=data_inicial)
 
+            # Puxar histórico do CDI
             try:
                 data_hoje_str = pd.Timestamp.now().strftime('%d/%m/%Y')
                 data_ini_str = pd.to_datetime(data_inicial).strftime('%d/%m/%Y')
@@ -472,21 +517,32 @@ try:
             except:
                 retorno_cdi_acum = pd.Series(0, index=dados_h.index)
 
+            # 1. Calcular retorno acumulado de CADA ativo ((Preço Atual / Preço Inicial) - 1)
             ret_ativos = (dados_h / dados_h.iloc[0]) - 1
-            pesos = carteira.set_index('ativo')['valor_patrimonio_atual'] / patrimonio_atual
+            
+            # 2. Calcular o peso de cada ativo na carteira (usando patrimonio_b3)
+            # AQUI ESTAVA O ERRO ANTES. Precisamos garantir que não divide por zero.
+            if patrimonio_b3 > 0:
+                pesos = carteira.set_index('ativo')['valor_patrimonio_atual'] / patrimonio_b3
+            else:
+                pesos = carteira.set_index('ativo')['valor_patrimonio_atual'] * 0
+
+            # 3. Multiplicar o retorno de cada ativo pelo seu peso na carteira
             cols_carteira = [t for t in tickers_list if t in ret_ativos.columns]
             
+            # Criar o DataFrame final para o gráfico
             df_comp = pd.DataFrame({
+                # Soma os retornos ponderados para ter a rentabilidade da carteira inteira
                 'Minha Carteira': (ret_ativos[cols_carteira] * pesos).sum(axis=1) * 100,
                 'Ibovespa': ret_ativos['^BVSP'] * 100 if '^BVSP' in ret_ativos.columns else 0,
                 'CDI': retorno_cdi_acum
-            }).ffill().fillna(0)
+            }).ffill().fillna(0) # Preenche espaços vazios para não quebrar a linha
 
-            # Cria o gráfico já removendo os textos automáticos do Plotly
+            # Desenha o Gráfico
             fig_comp = px.line(
                 df_comp, 
                 color_discrete_map={'Minha Carteira': '#00CC96', 'Ibovespa': '#EF553B', 'CDI': '#FFA500'},
-                labels={'index': '', 'value': ''} # <-- Fim do "index" e "value"
+                labels={'index': '', 'value': ''}
             )
 
             fig_comp.update_traces(
@@ -494,20 +550,40 @@ try:
                 hovertemplate="<b>%{fullData.name}</b>: %{y:.2f}%<extra></extra>"
             )
 
-            # 1. Aplica o fundo transparente (a Função Mestra)
             fig_comp = padronizar_grafico(fig_comp)
-
-            # 2. Ajuste Fino Visual (O Toque Premium)
             fig_comp.update_layout(
                 hovermode="x unified",
-                xaxis_title="", # Garante que o eixo X fica sem título
-                yaxis_title="", # Garante que o eixo Y fica sem título (mais limpo)
-                yaxis_ticksuffix="%", # Coloca o símbolo de % ao lado dos números
-                legend=dict(title="", orientation="h", y=1.1, x=0.5, xanchor="center"), # Legenda centralizada no topo
-                margin=dict(l=60, b=60, t=40, r=20) # l=60 salva as percentagens, b=60 salva as datas!
+                xaxis_title="", 
+                yaxis_title="", 
+                yaxis_ticksuffix="%", 
+                legend=dict(title="", orientation="h", y=1.1, x=0.5, xanchor="center"), 
+                margin=dict(l=60, b=60, t=40, r=20) 
             )
 
             st.plotly_chart(fig_comp, use_container_width=True, theme=None)
+
+        # 1. Salva os dados atuais no histórico e recupera a lista completa
+        df_historico = salvar_historico(patrimonio_global_total, patrimonio_b3, saldo_renda_fixa, valor_criptos_total)
+
+        # 2. Criar o Gráfico de Evolução
+        st.subheader("📈 Evolução do Patrimônio")
+        
+        if len(df_historico) > 1:
+            fig_evolucao = px.area(
+                df_historico, 
+                x='Data', 
+                y=['B3', 'Renda Fixa', 'Cripto'],
+                title="Crescimento Patrimonial por Categoria",
+                color_discrete_map={'B3': '#00CC96', 'Renda Fixa': '#FFA500', 'Cripto': '#9B59B6'},
+                labels={'value': 'Valor (R$)', 'Data': '', 'variable': 'Ativo'}
+            )
+            
+            fig_evolucao = padronizar_grafico(fig_evolucao)
+            fig_evolucao.update_layout(hovermode="x unified", margin=dict(b=40))
+            
+            st.plotly_chart(fig_evolucao, use_container_width=True)
+        else:
+            st.info("📊 O gráfico de evolução aparecerá aqui assim que tivermos dados de mais de um dia. Volte amanhã para ver o primeiro ponto de crescimento!")
 
 
     # ==========================================
@@ -646,18 +722,15 @@ try:
 
                     fig_corr = px.imshow(matriz_corr, text_auto=".2f", aspect="auto", color_continuous_scale='RdBu_r', zmin=-1, zmax=1)
                     
-                    # 1. PRIMEIRO: Aplicamos o fundo transparente
                     fig_corr = padronizar_grafico(fig_corr)
                     
-                    # 2. DEPOIS: Aplicamos as margens grandes e a altura dinâmica (assim a função mestra não esmaga isto)
                     altura_dinamica = max(500, len(tickers_corr) * 45)
                     
                     fig_corr.update_layout(
                         height=altura_dinamica, 
-                        margin=dict(l=100, b=100) # Margens generosas à esquerda e em baixo
+                        margin=dict(l=100, b=100) 
                     )
                     
-                    # dtick=1 força o gráfico a desenhar o nome de TODOS os ativos sem pular nenhum
                     fig_corr.update_xaxes(tickangle=-45, tickfont=dict(size=10), dtick=1)
                     fig_corr.update_yaxes(tickfont=dict(size=10), dtick=1)
                     
@@ -821,6 +894,54 @@ try:
             st.markdown("""<style>@media print { [data-testid="stSidebar"], header, footer { display: none !important; } .block-container { max-width: 100% !important; padding: 0 !important; } }</style>""", unsafe_allow_html=True)
             html_botao = """<div style="text-align: center;"><button onclick="window.parent.print()" style="background-color: #00CC96; color: #111; border: none; padding: 15px 30px; font-size: 18px; font-weight: bold; border-radius: 8px; cursor: pointer;">🖨️ Gerar Relatório em PDF</button></div>"""
             st.components.v1.html(html_botao, height=70)
+            
+    # ==========================================
+    # ==========================================
+    # ABA 6: OUTROS ATIVOS
+    # ==========================================
+    with tab6:
+        st.header("💎 Visão Detalhada: Criptomoedas e Renda Fixa")
+        
+        col_c1, col_c2 = st.columns(2)
+        
+        with col_c1:
+            with st.container(border=True):
+                st.subheader("₿ Criptomoedas")
+                if 'Cripto' in xls.sheet_names and not df_cripto.empty:
+                    st.dataframe(
+                        df_cripto,
+                        use_container_width=True,
+                        hide_index=True,
+                        column_config={
+                            "Ativo Cripto": st.column_config.TextColumn("Ativo"),
+                            "Quantidade": st.column_config.NumberColumn("Qtd", format="%.4f"),
+                            "Preço Médio": st.column_config.NumberColumn("Preço Médio", format="R$ %.2f"),
+                            "Preço Atual (R$)": st.column_config.NumberColumn("Cotação Atual", format="R$ %.2f"),
+                            "Valor Atual (R$)": st.column_config.NumberColumn("Total Atual", format="R$ %.2f"),
+                            "Lucro/Prejuízo (R$)": st.column_config.NumberColumn("L/P", format="R$ %.2f"),
+                            "Rentabilidade (%)": st.column_config.NumberColumn("Retorno", format="%.2f%%")
+                        }
+                    )
+                else:
+                    st.info("Nenhuma aba 'Cripto' encontrada ou a aba está vazia. Crie uma aba 'Cripto' no seu Excel com as colunas: 'Ativo Cripto', 'Entrada/Saída', 'Quantidade' e 'Preço'.")
+                    
+        with col_c2:
+            with st.container(border=True):
+                st.subheader("🏦 Renda Fixa")
+                if 'Renda Fixa' in xls.sheet_names and not df_rf.empty:
+                    st.dataframe(
+                        df_rf,
+                        use_container_width=True,
+                        hide_index=True,
+                        column_config={
+                            "Ativo RF": st.column_config.TextColumn("Ativo"),
+                            "Valor Investido": st.column_config.NumberColumn("Investido", format="R$ %.2f"),
+                            "Valor Atual": st.column_config.NumberColumn("Atual", format="R$ %.2f")
+                        }
+                    )
+                else:
+                    st.info("Nenhuma aba 'Renda Fixa' encontrada. Crie uma aba 'Renda Fixa' no seu Excel com as colunas: 'Ativo RF', 'Valor Investido' e 'Valor Atual'.")
+
 
 except Exception as e:
-    st.error(f"Erro ao processar ficheiro B3: {e}")
+    st.error(f"Erro ao processar ficheiro: {e}")
