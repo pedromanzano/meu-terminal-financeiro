@@ -741,9 +741,17 @@ elif aba_selecionada == "📊 Minha Carteira":
             with tab1:
                 st.subheader("📊 Posição B3")
                 if not carteira.empty:
+                    # 1. Criamos uma cópia para não estragar os cálculos que usam o .SA
+                    df_view = carteira.copy()
+                    
+                    # 2. Limpeza visual: remove o .SA e deixa o ticker em caixa alta
+                    df_view['ativo'] = df_view['ativo'].str.replace('.SA', '', case=False).str.upper()
+                    
+                    # 3. Exibição da Tabela Nativa (Segura e funcional)
                     st.dataframe(
-                        carteira[['ativo', 'quantidade_total', 'preco_medio', 'preco_atual', 'Tendência', 'MM200', 'Min_52S', 'Max_52S', 'lucro_prejuizo', 'rentabilidade_%']],
-                        use_container_width=True, hide_index=True,
+                        df_view[['ativo', 'quantidade_total', 'preco_medio', 'preco_atual', 'Tendência', 'MM200', 'Min_52S', 'Max_52S', 'lucro_prejuizo', 'rentabilidade_%']],
+                        use_container_width=True, 
+                        hide_index=True,
                         column_config={
                             "ativo": st.column_config.TextColumn("Ativo"),
                             "quantidade_total": st.column_config.NumberColumn("Qtd", format="%d"),
@@ -751,8 +759,8 @@ elif aba_selecionada == "📊 Minha Carteira":
                             "preco_atual": st.column_config.NumberColumn("Atual", format="R$ %.2f"),
                             "Tendência": st.column_config.TextColumn("Sinalizador"),
                             "MM200": st.column_config.NumberColumn("MM200", format="R$ %.2f"),
-                            "Min_52S": st.column_config.NumberColumn("Mín(52s)", format="R$ %.2f"),
-                            "Max_52S": st.column_config.NumberColumn("Máx(52s)", format="R$ %.2f"),
+                            "Min_52S": st.column_config.NumberColumn("Mín (52s)", format="R$ %.2f"),
+                            "Max_52S": st.column_config.NumberColumn("Máx (52s)", format="R$ %.2f"),
                             "lucro_prejuizo": st.column_config.NumberColumn("L/P", format="R$ %.2f"),
                             "rentabilidade_%": st.column_config.NumberColumn("Retorno", format="%.2f%%")
                         }
@@ -829,7 +837,11 @@ elif aba_selecionada == "📊 Minha Carteira":
                 if not carteira.empty:
                     total_divs_detectados = carteira['dividendos_12m'].sum()
                     if total_divs_detectados > 0:
+                        # Criamos a cópia filtrada
                         df_com_dividendos = carteira[carteira['dividendos_12m'] > 0].copy()
+            
+                        # --- LIMPEZA DOS TICKERS (.SA fora e CAIXA ALTA) ---
+                        df_com_dividendos['ativo'] = df_com_dividendos['ativo'].str.replace('.SA', '', case=False).str.upper()
                         
                         # Criando a Projeção (Média Mensal)
                         df_com_dividendos['projecao_mensal'] = df_com_dividendos['dividendos_12m'] / 12
@@ -862,7 +874,8 @@ elif aba_selecionada == "📊 Minha Carteira":
                             st.plotly_chart(padronizar_grafico(fig_div_bar), use_container_width=True)
                     else:
                         st.info("⚠️ Nenhuma renda passiva mapeada (verifique se os ativos pagam dividendos).")
-                else: st.warning("Adicione ativos para ver a análise de proventos.")
+                else: 
+                    st.warning("Adicione ativos para ver a análise de proventos.")
 
             with tab3:
                 st.subheader("🛡️ Teste de Stress: Cenários de Crise")
@@ -918,9 +931,28 @@ elif aba_selecionada == "📊 Minha Carteira":
                 with col_r1:
                     st.subheader("📊 Matriz de Correlação")
                     if st.button("🧬 Gerar Matriz") and not carteira.empty:
+                        # Mantemos o .SA aqui para a função buscar os dados corretamente na API
                         dados_corr = carregar_dados_historicos(carteira['ativo'].tolist(), period="1y")
+                        
                         if not dados_corr.empty:
-                            fig_corr = px.imshow(dados_corr.pct_change().dropna().corr(), text_auto=".2f", aspect="auto", color_continuous_scale='RdBu_r', zmin=-1, zmax=1)
+                            # 1. Calculamos a matriz de correlação
+                            corr_matrix = dados_corr.pct_change().dropna().corr()
+                            
+                            # 2. Limpamos os nomes: Removemos .SA e deixamos em MAIÚSCULAS
+                            corr_matrix.columns = [c.replace('.SA', '').upper() for c in corr_matrix.columns]
+                            corr_matrix.index = [i.replace('.SA', '').upper() for i in corr_matrix.index]
+                            
+                            # 3. Geramos o Heatmap com a matriz já "limpa"
+                            fig_corr = px.imshow(
+                                corr_matrix, 
+                                text_auto=".2f", 
+                                aspect="auto", 
+                                color_continuous_scale='RdBu_r', 
+                                zmin=-1, 
+                                zmax=1
+                            )
+                            
+                            # Aplicamos sua função de padronização e plotamos
                             st.plotly_chart(padronizar_grafico(fig_corr), use_container_width=True)
                 with col_r2:
                     st.subheader("🌎 Sensibilidade Cambial")
