@@ -447,7 +447,12 @@ with st.sidebar:
         authenticator.logout('Sair do Sistema', 'sidebar')
         
         # 2. Barra Lateral com IA
-        genai.configure(api_key="AIzaSyAccII1x9XNP2qX2kcakRpEVOnQvr58E4w")
+        # carregamos a chave do Google a partir dos secrets do Streamlit para evitar vazamentos
+        api_key = st.secrets.get("GOOGLE_API_KEY")
+        if not api_key:
+            st.error("Chave da API Google Generative não configurada. Por favor, adicione GOOGLE_API_KEY em secrets.toml ou nas variáveis de ambiente.")
+            st.stop()
+        genai.configure(api_key=api_key)
         model = genai.GenerativeModel('gemini-3-flash-preview')
         
         st.header("🤖 Assistente InvestiCortes")
