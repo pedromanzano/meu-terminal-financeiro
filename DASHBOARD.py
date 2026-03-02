@@ -14,7 +14,7 @@ import urllib.parse
 import xml.etree.ElementTree as ET
 import yfinance as yf
 import plotly.graph_objects as go
-
+import google.generativeai as genai
 # ==========================================
 # 1. CONFIGURAÇÃO DA PÁGINA E CSS
 # ==========================================
@@ -443,42 +443,62 @@ with st.sidebar:
         # 📥 IMPORTADOR DA B3
         # ==========================================
         # ... (código do importador que já está aí) ...
-
-        # ==========================================
-        # 💾 EXPORTAR BACKUP (CSV / GOOGLE SHEETS)
-        # ==========================================
-        st.divider()
-        st.subheader("💾 Exportar Dados")
-        st.caption("Faça backup das suas ordens para planilhas.")
-        
-        try:
-            # Puxa os dados limpos direto do cofre (Supabase)
-            res_backup = supabase.table("transacoes").select("*").eq("usuario", st.session_state["username"]).execute()
-            df_backup = pd.DataFrame(res_backup.data)
-            
-            if not df_backup.empty:
-                # Remove colunas de sistema do Supabase para o arquivo ficar limpo
-                colunas_uteis = ['data', 'ativo', 'mercado', 'tipo', 'quantidade', 'preco']
-                df_backup_limpo = df_backup[[c for c in colunas_uteis if c in df_backup.columns]]
-                
-                # Converte para CSV
-                csv = df_backup_limpo.to_csv(index=False).encode('utf-8')
-                
-                st.download_button(
-                    label="📥 Baixar Backup (.csv)",
-                    data=csv,
-                    file_name=f"backup_investimentos_{date.today()}.csv",
-                    mime="text/csv",
-                    use_container_width=True
-                )
-            else:
-                st.info("Nenhuma ordem para exportar.")
-        except Exception as e:
-            st.error("Falha ao gerar o arquivo de backup.")
-
         st.divider()
         authenticator.logout('Sair do Sistema', 'sidebar')
+        
+        # 2. Barra Lateral com IA
+        genai.configure(api_key="AIzaSyAccII1x9XNP2qX2kcakRpEVOnQvr58E4w")
+        model = genai.GenerativeModel('gemini-3-flash-preview')
+        
+        st.header("🤖 Assistente InvestiCortes")
+        st.caption("Analista de I.A. focado em B3 e FIIs")
+        
+        # Inicializa o histórico se não existir
+        if "chat_history" not in st.session_state:
+            st.session_state.chat_history = []
 
+        # Container para o chat (para não empurrar os outros itens da sidebar)
+        chat_container = st.container(height=400)
+        
+        with chat_container:
+            for message in st.session_state.chat_history:
+                with st.chat_message(message["role"]):
+                    st.markdown(message["content"])
+
+        # Entrada de texto (Chat Input)
+        if prompt := st.chat_input("Pergunte sobre VALE3, PETR4..."):
+            # Mostra a pergunta do usuário
+            st.session_state.chat_history.append({"role": "user", "content": prompt})
+            with chat_container.chat_message("user"):
+                st.markdown(prompt)
+
+            # Gera a resposta com o Gemini Flash
+            with chat_container.chat_message("assistant"):
+                with st.spinner("Consultando dados..."):
+                    # Prompt de Sistema (Instrução Invisível)
+                    sistema = "Aja como um analista de investimentos sênior da InvestiCortes. Seja direto, use termos técnicos corretamente e foque em ativos como ações e FIIs da B3. Nunca responda sobre assuntos fora de finanças."
+                    full_query = f"{sistema}\n\nUsuário: {prompt}"
+                    
+                    try:
+                        response = model.generate_content(full_query)
+                        answer = response.text
+                        st.markdown(answer)
+                        st.session_state.chat_history.append({"role": "assistant", "content": answer})
+                    except Exception as e:
+                        import logging, traceback
+                        logging.getLogger(__name__).exception("Falha ao gerar resposta da IA")
+                        tb = traceback.format_exc()
+                        # Mensagem amigável ao usuário com opção de ver detalhes para depuração
+                        st.error("Não foi possível gerar a resposta da I.A. no momento. Tente novamente em alguns instantes.")
+                        with st.expander("Detalhes do erro (apenas para depuração)"):
+                            st.text(str(e))
+                            st.text(tb)
+                        # Armazenamos o erro no estado para inspeção futura
+                        st.session_state['last_ai_error'] = {
+                            "message": str(e),
+                            "traceback": tb,
+                            "timestamp": pd.Timestamp.now().isoformat()                        
+                        }
 # ==========================================
 # 🏠 PÁGINA 1: HOME PÚBLICA
 # ==========================================

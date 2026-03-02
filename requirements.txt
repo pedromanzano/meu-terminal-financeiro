@@ -5,11 +5,7 @@ plotly
 numpy
 openpyxl
 statsmodels
-<<<<<<< HEAD
 xlrd
-streamlit_authenticator
-supabase
-=======
 streamlit-authenticator
-xlrd
->>>>>>> 9c6f0061ba7fd4c0b1006a7d74da1542cc9e8889
+supabase
+google-generativeai
