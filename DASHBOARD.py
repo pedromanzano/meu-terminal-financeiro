@@ -652,9 +652,17 @@ elif aba_selecionada == "📊 Minha Carteira":
                         # --- O código continua normalmente abaixo ---
                         carteira['preco_atual'] = p_atuais
                         carteira['dividendos_12m'] = divs_12m
+                        
+                        # 1. Calcula o patrimônio atual
                         carteira['valor_patrimonio_atual'] = carteira['quantidade_total'] * carteira['preco_atual']
-                        carteira['lucro_prejuizo'] = carteira['valor_patrimonio_atual'] - carteira['custo_total']
-                        carteira['rentabilidade_%'] = (carteira['lucro_prejuizo'] / carteira['custo_total']) * 100
+                        
+                        # 2. A LINHA QUE FALTAVA: Calcula o Custo Total (Qtd * Preço Médio)
+                        carteira['custo_total'] = carteira['quantidade_total'] * carteira['preco_medio']
+                        
+                        # 3. Lucro da Posição Atual (Aberto)
+                        carteira['lucro_prejuizo_nao_realizado'] = carteira['valor_patrimonio_atual'] - carteira['custo_total']
+                        carteira['rentabilidade_%'] = (carteira['lucro_prejuizo_nao_realizado'] / carteira['custo_total']) * 100
+                        
                         carteira['var_dia_pct'] = vars_pct
                         carteira['MM200'] = mm200_l
                         carteira['Min_52S'] = min_52w_lista
@@ -663,7 +671,9 @@ elif aba_selecionada == "📊 Minha Carteira":
                         
                         patrimonio_b3 = carteira['valor_patrimonio_atual'].sum()
                         investido_b3 = carteira['custo_total'].sum()
-                        lucro_b3_reais = patrimonio_b3 - investido_b3
+                        
+                        # Lucro Global = O que já botou no bolso (Vendas) + O que está rendendo agora
+                        lucro_b3_reais = lucro_realizado_b3 + (patrimonio_b3 - investido_b3)
                         rentabilidade_b3_pct = (lucro_b3_reais / investido_b3 * 100) if investido_b3 > 0 else 0
 
                     # --- CRIPTO ---
