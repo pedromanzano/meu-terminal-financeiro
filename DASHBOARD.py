@@ -15,6 +15,7 @@ import xml.etree.ElementTree as ET
 import yfinance as yf
 import plotly.graph_objects as go
 import google.generativeai as genai
+
 # ==========================================
 # 1. CONFIGURAÇÃO DA PÁGINA E CSS
 # ==========================================
@@ -41,10 +42,10 @@ def padronizar_grafico(fig):
         font=dict(color="#E0E0E0"), margin=dict(t=50, l=10, r=10, b=10)
     )
     return fig
+
 # ==========================================
 # ⚡ MOTOR DE DADOS (HÍBRIDO: BRAPI + YFINANCE)
 # ==========================================
-# Mudança Tática: Usamos o Requests direto para a BRAPI (não o pacote sdk) para evitar bugs de versão.
 
 @st.cache_data(ttl=86400, show_spinner=False)
 def buscar_tickers_brapi(pesquisa=None):
@@ -55,7 +56,7 @@ def buscar_tickers_brapi(pesquisa=None):
         resp = requests.get(url, timeout=10).json()
         return [acao['stock'] for acao in resp.get('stocks', [])]
     except:
-        return ["PETR4", "VALE3", "ITUB4", "BBDC4", "WEGE3"] # Fallback de emergência
+        return["PETR4", "VALE3", "ITUB4", "BBDC4", "WEGE3"] # Fallback de emergência
 
 @st.cache_data(ttl=300, show_spinner=False)
 def obter_preco_atual(ticker):
@@ -66,21 +67,27 @@ def obter_preco_atual(ticker):
         dados = requests.get(url, timeout=5).json()
         return float(dados['results'][0]['regularMarketPrice'])
     except:
-        # Fallback YFinance se BRAPI falhar
-        try: return float(yf.Ticker(ticker_limpo + ".SA").fast_info['lastPrice'])
-        except: return 0.0
+        # Fallback YFinance se BRAPI falhar (Corrigido para evitar o fast_info depreciado)
+        try: 
+            df_hist = yf.Ticker(ticker_limpo + ".SA").history(period="1d")
+            if not df_hist.empty:
+                return float(df_hist['Close'].iloc[-1])
+            return 0.0
+        except: 
+            return 0.0
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def obter_dividendos(ticker):
-    """Busca dividendos reais (Híbrido YFinance + BRAPI) e remove fusos horários"""
+    """Busca dividendos reais (Híbrido YFinance + BRAPI) e remove fusos horários de forma segura"""
     ticker_limpo = ticker.replace('.SA', '')
     
-    # 1. Tenta YFinance (É o mais rápido e confiável para histórico de proventos)
+    # 1. Tenta YFinance
     try:
         acao = yf.Ticker(ticker_limpo + ".SA")
         divs = acao.dividends
         if not divs.empty:
-            divs.index = divs.index.tz_localize(None) # ⏰ A MÁGICA: Arranca o fuso horário fora!
+            if getattr(divs.index, 'tz', None) is not None:
+                divs.index = divs.index.tz_localize(None) # ⏰ A MÁGICA SEGURA: Arranca o fuso horário
             return divs
     except: pass
     
@@ -88,12 +95,13 @@ def obter_dividendos(ticker):
     try:
         url = f"https://brapi.dev/api/quote/{ticker_limpo}?token={TOKEN_BRAPI}&dividends=true"
         dados = requests.get(url, timeout=5).json()
-        divs_list = dados['results'][0].get('dividendsData', {}).get('cashDividends', [])
+        divs_list = dados['results'][0].get('dividendsData', {}).get('cashDividends',[])
         if divs_list:
             df = pd.DataFrame(divs_list)
-            # A BRAPI às vezes muda o nome da coluna, aqui garantimos a leitura correta
             col_valor = 'rate' if 'rate' in df.columns else 'assetIssuedDividend'
-            df['date'] = pd.to_datetime(df['paymentDate']).dt.tz_localize(None) # ⏰ Sem fuso!
+            df['date'] = pd.to_datetime(df['paymentDate'])
+            if getattr(df['date'].dt, 'tz', None) is not None:
+                df['date'] = df['date'].dt.tz_localize(None) # ⏰ Sem fuso!
             df.set_index('date', inplace=True)
             return df[col_valor]
     except: pass
@@ -102,25 +110,9 @@ def obter_dividendos(ticker):
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def carregar_dados_historicos(tickers, start=None, end=None, period="1y"):
-    """
-    Motor Histórico via YFinance. 
-    (YFinance é imbatível para gráficos de linha longos, CDI, Dólar e Monte Carlo).
-    """
-    if isinstance(tickers, str): tickers = [tickers]
-    tickers_yf = [t + ".SA" if not t.endswith('.SA') and not t.startswith('^') and "=" not in t else t for t in tickers]
-    try:
-        df = yf.download(tickers_yf, start=start, end=end, period=period, progress=False)['Close']
-        if isinstance(df, pd.Series): df = df.to_frame(name=tickers[0])
-        df.columns = tickers # Devolve os nomes originais para o sistema
-        return df.ffill().dropna()
-    except Exception as e:
-        return pd.DataFrame()
-
-@st.cache_data(ttl=3600, show_spinner=False)
-def carregar_dados_historicos(tickers, start=None, end=None, period="1y"):
     """Motor Histórico YFinance blindado contra ações novas e falhas de ordenação"""
     if isinstance(tickers, str): tickers = [tickers]
-    tickers_yf = [t + ".SA" if not t.endswith('.SA') and not t.startswith('^') and "=" not in t else t for t in tickers]
+    tickers_yf =[t + ".SA" if not t.endswith('.SA') and not t.startswith('^') and "=" not in t else t for t in tickers]
     try:
         kwargs = {'progress': False}
         if start and end:
@@ -166,7 +158,7 @@ def carregar_cdi_historico(data_inicio, data_fim):
 @st.cache_data(ttl=3600, show_spinner=False)
 def buscar_pvp_fiis(lista_fiis_config):
     """Calcula P/VP e define Status semântico para cada setor"""
-    dados = []
+    dados =[]
     for fii, segmento in lista_fiis_config.items():
         try:
             ticker_nome = f"{fii.strip()}.SA"
@@ -213,7 +205,7 @@ def buscar_pvp_fiis(lista_fiis_config):
 @st.cache_data(ttl=600)
 def scanner_volume_atipico():
     """Scanner de alta sensibilidade com redundância de dados"""
-    tickers = [
+    tickers =[
         'VALE3.SA', 'PETR4.SA', 'ITUB4.SA', 'BBDC4.SA', 'ABEV3.SA', 'MGLU3.SA', 
         'B3SA3.SA', 'BBAS3.SA', 'RENT3.SA', 'WEGE3.SA', 'HAPV3.SA', 'GGBR4.SA', 
         'PRIO3.SA', 'ELET3.SA', 'SUZB3.SA', 'CSAN3.SA', 'LREN3.SA', 'RADL3.SA',
@@ -226,7 +218,7 @@ def scanner_volume_atipico():
     minutos_passados = max((agora - inicio).total_seconds() / 60, 1)
     proporcao_esperada = min(minutos_passados / 420, 1.0)
 
-    anomalias = []
+    anomalias =[]
     
     try:
         # Puxamos 5 dias para garantir que o Yahoo tenha dados de hoje (intervalo 5m é mais estável)
@@ -239,7 +231,6 @@ def scanner_volume_atipico():
 
         for t in tickers:
             try:
-                # Volume de hoje (últimas colunas do dataframe de 5m)
                 hoje_v = vol_data[t].dropna()
                 hoje_p = close_data[t].dropna()
                 
@@ -249,7 +240,6 @@ def scanner_volume_atipico():
                 preco_atual = hoje_p.iloc[-1]
                 preco_abertura = hoje_p.iloc[0]
                 
-                # Média de 20 dias (Download separado para estabilidade)
                 hist = yf.Ticker(t).history(period="25d")
                 media_vol_20d = hist['Volume'].iloc[-21:-1].mean()
                 
@@ -257,7 +247,6 @@ def scanner_volume_atipico():
                 rvol = vol_hoje / vol_esperado if vol_esperado > 0 else 0
                 var_dia = ((preco_atual / preco_abertura) - 1) * 100
                 
-                # Baixamos o sarrafo: se tiver 80% do volume esperado, já entra na lista
                 if rvol > 0.8:
                     if rvol > 1.2:
                         fluxo = "🏦 Institucional"
@@ -266,9 +255,7 @@ def scanner_volume_atipico():
                     
                     fluxo += " (Compra)" if var_dia > 0.2 else (" (Venda)" if var_dia < -0.2 else " (Lateral)")
 
-                    # --- NOVO CDN DE LOGOS (Mais estável para B3) ---
                     ticker_limpo = t.replace('.SA', '').upper()
-                    # Fonte alternativa muito estável da Itau Corretora
                     logo_url = f"https://static.itaucpa.com.br/itau-corretora/logos-acoes/{ticker_limpo}.png"
 
                     anomalias.append({
@@ -287,21 +274,25 @@ def scanner_volume_atipico():
 
 def style_pvp_inteligente(row):
     status = row['Status']
-    
-    # Mapeamento direto de Cor por Texto de Status
     if "🟢" in status:
-        return ['color: #00CC96; font-weight: bold'] * len(row) # Verde
+        return['color: #00CC96; font-weight: bold'] * len(row)
     elif "🟠" in status:
-        return ['color: #FFA500; font-weight: bold'] * len(row) # Laranja
+        return['color: #FFA500; font-weight: bold'] * len(row)
     else:
-        return ['color: #EF553B; font-weight: bold'] * len(row) # Vermelho
+        return ['color: #EF553B; font-weight: bold'] * len(row)
+
 # ==========================================
 # 🔐 CONEXÃO BANCO DE DADOS E AUTENTICAÇÃO
 # ==========================================
 try:
-    supabase: Client = create_client(st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_KEY"])
+    url = st.secrets.get("SUPABASE_URL")
+    key = st.secrets.get("SUPABASE_KEY")
+    if not url or not key:
+        st.error("⚠️ Banco de dados não configurado. Adicione SUPABASE_URL e SUPABASE_KEY no secrets.toml.")
+        st.stop()
+    supabase: Client = create_client(url, key)
 except Exception as e:
-    st.error("Erro ao conectar com o Supabase. Verifique o secrets.toml.")
+    st.error(f"Erro ao inicializar o Supabase: {e}")
     st.stop()
 
 credentials = {
@@ -316,32 +307,22 @@ authenticator = stauth.Authenticate(credentials, "investimentos_dashboard", "cha
 # ==========================================
 with st.sidebar:
     st.title("💼 Investimentos")
-    aba_selecionada = st.radio("Navegação", ["🏠 Home (Mercado)", "📊 Minha Carteira"])
+    aba_selecionada = st.radio("Navegação",["🏠 Home (Mercado)", "📊 Minha Carteira"])
     
     if st.session_state.get("authentication_status"):
-        # ==========================================
-        # 🧭 MENU LATERAL (NAVEGAÇÃO E FORMULÁRIO)
-        # ==========================================
         st.divider()
         st.subheader("➕ Nova Transação")
         
-        # O novo motor buscando a lista de forma rápida
         lista_acoes = buscar_tickers_brapi()
-        lista_acoes_atual = ["BTC", "ETH", "SOL", "USDT"] + lista_acoes
+        lista_acoes_atual =["BTC", "ETH", "SOL", "USDT"] + lista_acoes
         
-        # TIRAMOS O MERCADO DO FORMULÁRIO PARA A TELA FICAR DINÂMICA
-        f_mercado = st.selectbox("Mercado", ["B3 (Ações/FIIs)", "Criptomoedas", "Renda Fixa"])
+        f_mercado = st.selectbox("Mercado",["B3 (Ações/FIIs)", "Criptomoedas", "Renda Fixa"])
         
         with st.form("form_nova_transacao", clear_on_submit=True):
-            
-            # --- O PULO DO GATO ---
             if f_mercado == "Renda Fixa":
-                # Campo de texto livre para você digitar o nome do título
                 f_ativo = st.text_input("Nome do Título (Ex: Tesouro IPCA+ 2045, Tesouro Renda+ 2065)")
             else:
-                # Menu suspenso normal para ações e criptos
                 f_ativo = st.selectbox("Ativo (Ex: PETR4, BTC)", options=lista_acoes_atual)
-            # ----------------------
             
             f_tipo = st.selectbox("Tipo", ["Compra", "Venda"])
             
@@ -354,7 +335,7 @@ with st.sidebar:
             if st.form_submit_button("Salvar") and f_ativo:
                 supabase.table("transacoes").insert({
                     "usuario": st.session_state["username"], 
-                    "ativo": f_ativo.strip(), # O strip() remove espaços vazios no final do texto
+                    "ativo": f_ativo.strip(), 
                     "mercado": f_mercado, 
                     "tipo": f_tipo, 
                     "quantidade": f_qtd, 
@@ -363,14 +344,10 @@ with st.sidebar:
                 st.success(f"{f_ativo} salvo!")
                 st.rerun()
 
-        # ==========================================
-        # 🗑️ A BORRACHA DIGITAL (GERENCIADOR)
-        # ==========================================
         st.divider()
         st.subheader("🗑️ Gerenciar Lançamentos")
         with st.expander("Ver Últimas 10 Ordens"):
             try:
-                # Puxa as ordens do banco ordenadas pelas mais recentes
                 res_ordens = supabase.table("transacoes").select("*").eq("usuario", st.session_state["username"]).order("id", desc=True).limit(10).execute()
                 df_ordens = pd.DataFrame(res_ordens.data)
                 
@@ -381,7 +358,6 @@ with st.sidebar:
                             st.caption(f"{ordem['ativo']} - {ordem['tipo']}")
                             st.write(f"{ordem['quantidade']} un | R$ {ordem['preco']}")
                         with col_ord2:
-                            # O botão de deletar envia o ID direto pro Supabase
                             if st.button("❌", key=f"del_{ordem['id']}"):
                                 supabase.table("transacoes").delete().eq("id", ordem['id']).execute()
                                 st.success("Apagado!")
@@ -392,9 +368,6 @@ with st.sidebar:
             except Exception as e:
                 st.error("Erro ao carregar ordens.")
 
-        # ==========================================
-        # 📥 IMPORTADOR DA B3
-        # ==========================================
         st.divider()
         st.subheader("📥 Importação Automática (B3)")
         st.caption("Extrato em Excel (.xlsx)")
@@ -411,16 +384,16 @@ with st.sidebar:
                         col_p = 'preço' if 'preço' in cols else 'preco'
                         
                         if 'ativo' in cols and 'quantidade' in cols and col_p in cols:
-                            novas_ordens = []
+                            novas_ordens =[]
                             for _, linha in df_import.iterrows():
                                 ativo_completo = str(linha['ativo']).strip().upper()
                                 if ativo_completo == 'NAN' or not ativo_completo: continue
                                 ativo_nome = ativo_completo.split(' -')[0].strip()
                                 dir_str = str(linha.get('entrada/saída', '')).strip().lower()
-                                tipo_ordem = "Compra" if dir_str in ['credito', 'entrada', 'c', 'compra'] else "Venda"
+                                tipo_ordem = "Compra" if dir_str in['credito', 'entrada', 'c', 'compra'] else "Venda"
                                 
                                 mercado = "B3 (Ações/FIIs)"
-                                if any(crip in ativo_nome for crip in ['BTC', 'ETH', 'SOL']): mercado = "Criptomoedas"
+                                if any(crip in ativo_nome for crip in['BTC', 'ETH', 'SOL']): mercado = "Criptomoedas"
                                 elif any(rf in ativo_nome for rf in ['TESOURO', 'CDB', 'LCI', 'LCA']): mercado = "Renda Fixa"
 
                                 try:
@@ -439,30 +412,25 @@ with st.sidebar:
                 except Exception as e:
                     st.error(f"Erro: {e}")
         
-        # ==========================================
-        # 📥 IMPORTADOR DA B3
-        # ==========================================
-        # ... (código do importador que já está aí) ...
         st.divider()
         authenticator.logout('Sair do Sistema', 'sidebar')
         
         # 2. Barra Lateral com IA
-        # carregamos a chave do Google a partir dos secrets do Streamlit para evitar vazamentos
         api_key = st.secrets.get("GOOGLE_API_KEY")
         if not api_key:
-            st.error("Chave da API Google Generative não configurada. Por favor, adicione GOOGLE_API_KEY em secrets.toml ou nas variáveis de ambiente.")
+            st.error("Chave da API Google Generative não configurada em secrets.toml.")
             st.stop()
+            
         genai.configure(api_key=api_key)
-        model = genai.GenerativeModel('gemini-3-flash-preview')
+        # Corrigido para a versão oficial de produção da API
+        model = genai.GenerativeModel('gemini-1.5-flash')
         
         st.header("🤖 Assistente InvestiCortes")
         st.caption("Analista de I.A. focado em B3 e FIIs")
         
-        # Inicializa o histórico se não existir
         if "chat_history" not in st.session_state:
-            st.session_state.chat_history = []
+            st.session_state.chat_history =[]
 
-        # Container para o chat (para não empurrar os outros itens da sidebar)
         chat_container = st.container(height=400)
         
         with chat_container:
@@ -470,17 +438,13 @@ with st.sidebar:
                 with st.chat_message(message["role"]):
                     st.markdown(message["content"])
 
-        # Entrada de texto (Chat Input)
         if prompt := st.chat_input("Pergunte sobre VALE3, PETR4..."):
-            # Mostra a pergunta do usuário
             st.session_state.chat_history.append({"role": "user", "content": prompt})
             with chat_container.chat_message("user"):
                 st.markdown(prompt)
 
-            # Gera a resposta com o Gemini Flash
             with chat_container.chat_message("assistant"):
                 with st.spinner("Consultando dados..."):
-                    # Prompt de Sistema (Instrução Invisível)
                     sistema = "Aja como um analista de investimentos sênior da InvestiCortes. Seja direto, use termos técnicos corretamente e foque em ativos como ações e FIIs da B3. Nunca responda sobre assuntos fora de finanças."
                     full_query = f"{sistema}\n\nUsuário: {prompt}"
                     
@@ -493,17 +457,11 @@ with st.sidebar:
                         import logging, traceback
                         logging.getLogger(__name__).exception("Falha ao gerar resposta da IA")
                         tb = traceback.format_exc()
-                        # Mensagem amigável ao usuário com opção de ver detalhes para depuração
-                        st.error("Não foi possível gerar a resposta da I.A. no momento. Tente novamente em alguns instantes.")
+                        st.error("Não foi possível gerar a resposta da I.A. no momento.")
                         with st.expander("Detalhes do erro (apenas para depuração)"):
                             st.text(str(e))
                             st.text(tb)
-                        # Armazenamos o erro no estado para inspeção futura
-                        st.session_state['last_ai_error'] = {
-                            "message": str(e),
-                            "traceback": tb,
-                            "timestamp": pd.Timestamp.now().isoformat()                        
-                        }
+
 # ==========================================
 # 🏠 PÁGINA 1: HOME PÚBLICA
 # ==========================================
@@ -511,7 +469,6 @@ if aba_selecionada == "🏠 Home (Mercado)":
     st.title("🏛️ InvestiTerminal | Inteligência & Dados")
     st.subheader("Painel de Monitoramento de Anomalias de Mercado")
 
-    # Ticker de Índices no Topo
     indices = {'^BVSP': 'Ibovespa', '^IXIC': 'Nasdaq', 'BRL=X': 'Dólar'}
     cols = st.columns(len(indices))
     
@@ -524,24 +481,22 @@ if aba_selecionada == "🏠 Home (Mercado)":
     
     st.divider()
     
-    # --- LINHA 1: VOLATILIDADE E SENTIMENTO ---
     col_s1, col_s2 = st.columns([1, 1])
     
     with col_s1:
         st.write("### 🌡️ Índice de Volatilidade (Fear & Greed)")
-        # Lógica: Baseado no desvio padrão do IBOV vs Média Móvel
-        sentimento = 62  # Exemplo: Mercado em Ganância Moderada
+        sentimento = 62 
         
         fig = go.Figure(go.Indicator(
             mode = "gauge+number",
             value = sentimento,
             gauge = {
-                'axis': {'range': [0, 100]},
+                'axis': {'range':[0, 100]},
                 'bar': {'color': "#00CC96" if sentimento > 50 else "#EF553B"},
                 'steps': [
-                    {'range': [0, 30], 'color': "#ff4b4b"}, # Medo Extremo
-                    {'range': [30, 70], 'color': "#ffffff"}, # Neutro
-                    {'range': [70, 100], 'color': "#00cc96"} # Ganância Extrema
+                    {'range':[0, 30], 'color': "#ff4b4b"},
+                    {'range':[30, 70], 'color': "#ffffff"},
+                    {'range': [70, 100], 'color': "#00cc96"}
                 ],
             }
         ))
@@ -557,7 +512,6 @@ if aba_selecionada == "🏠 Home (Mercado)":
             df_fluxo_real = scanner_volume_atipico()
             
             if not df_fluxo_real.empty:
-                # 🛡️ Garantia: removemos qualquer linha que não tenha link de logo para não poluir
                 df_mostrar = df_fluxo_real.dropna(subset=['Logo'])
                 
                 st.dataframe(
@@ -569,7 +523,7 @@ if aba_selecionada == "🏠 Home (Mercado)":
                     use_container_width=True, 
                     hide_index=True,
                     column_config={
-                        "Logo": st.column_config.ImageColumn(" ", width="small"), # Título vazio para estética
+                        "Logo": st.column_config.ImageColumn(" ", width="small"),
                         "Ativo": st.column_config.TextColumn("Ticker", width="medium"),
                         "Análise de Fluxo": st.column_config.TextColumn("Sentimento do Smart Money")
                     }
@@ -579,7 +533,6 @@ if aba_selecionada == "🏠 Home (Mercado)":
 
     st.divider()
 
-    # --- LINHA 2: SCANNERS DE VALUATION (DEEP VALUE) ---
     st.write("### 🔍 Scanners de Oportunidades Estáticas")
     c1, c2, c3 = st.columns(3)
 
@@ -597,18 +550,21 @@ if aba_selecionada == "🏠 Home (Mercado)":
 
     st.divider()
     
-    # --- FOOTER PROFISSIONAL ---
     st.info("""
     **Acesso Restrito:** Para visualizar o Radar de FIIs detalhado, Gestão de Carteira e o Simulador de Rebalanceamento Automático, utilize o painel de autenticação na barra lateral.
     """)
-# ==========================================
+
 # ==========================================
 # 📊 PÁGINA 2: ÁREA RESTRITA (DASHBOARD)
 # ==========================================
 elif aba_selecionada == "📊 Minha Carteira":
     if not st.session_state.get("authentication_status"):
         st.subheader("🔑 Área Restrita")
-        authenticator.login(location='main', key='login_carteira')
+        try:
+            authenticator.login(location='main', key='login_carteira')
+        except TypeError:
+            # Compatibilidade com a nova versão do streamlit_authenticator
+            authenticator.login("main")
     
     if st.session_state.get("authentication_status"):
         try:
@@ -637,26 +593,17 @@ elif aba_selecionada == "📊 Minha Carteira":
                         carteira = pd.merge(posicao[posicao['qtd_adj'] > 0], custo_compra, on='ativo_limpo', how='left').rename(columns={'ativo_limpo': 'ativo', 'qtd_adj': 'quantidade_total'})
                         carteira['custo_total'] = carteira['quantidade_total'] * carteira['preco_medio']
 
-                        p_atuais, mm200_l, max_52w_lista, min_52w_lista, vars_pct, divs_12m = [], [], [], [], [], []
+                        p_atuais, mm200_l, max_52w_lista, min_52w_lista, vars_pct, divs_12m = [], [], [], [], [],[]
                         variacao_total_dia, patrimonio_ontem = 0.0, 0.0
 
                         for _, row in carteira.iterrows():
                             ticker = row['ativo']
-                            
-                            # Variáveis temporárias (se der erro, elas ficam com 0)
-                            p_atual_val = 0.0
-                            mm200_val = 0.0
-                            max52_val = 0.0
-                            min52_val = 0.0
-                            var_pct_val = 0.0
-                            divs_val = 0.0
+                            p_atual_val, mm200_val, max52_val, min52_val, var_pct_val, divs_val = 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
                             
                             try:
-                                # 1. Buscar Preço Atual (BRAPI)
                                 p_atual_val = obter_preco_atual(ticker)
-                                
-                                # Pegando dados históricos rápidos
                                 df_hist_rapido = carregar_dados_historicos(ticker, period="1y")
+                                
                                 if not df_hist_rapido.empty:
                                     mm200_val = df_hist_rapido[ticker].rolling(200).mean().iloc[-1] if len(df_hist_rapido) >= 200 else df_hist_rapido[ticker].mean()
                                     max52_val = df_hist_rapido[ticker].max()
@@ -666,15 +613,12 @@ elif aba_selecionada == "📊 Minha Carteira":
                                     mm200_val, max52_val, min52_val, p_ant = p_atual_val, p_atual_val, p_atual_val, p_atual_val
 
                                 var_pct_val = ((p_atual_val / p_ant) - 1) * 100 if p_ant > 0 else 0
-                                
                                 variacao_total_dia += (p_atual_val - p_ant) * row['quantidade_total']
                                 patrimonio_ontem += p_ant * row['quantidade_total']
                                 
-                                # 2. Buscar Dividendos (Híbrido e Blindado)
                                 hist_div = obter_dividendos(ticker)
                                 if not hist_div.empty:
-                                    # Garantia extra contra o bug do fuso horário
-                                    if hist_div.index.tz is not None:
+                                    if getattr(hist_div.index, 'tz', None) is not None:
                                         hist_div.index = hist_div.index.tz_localize(None)
                                         
                                     data_corte = pd.Timestamp.now().replace(tzinfo=None) - pd.DateOffset(years=1)
@@ -682,9 +626,8 @@ elif aba_selecionada == "📊 Minha Carteira":
                                     divs_val = total_div if not pd.isna(total_div) else 0.0
 
                             except Exception as e:
-                                pass # Se falhar, as variáveis continuam com os valores padrão (0.0)
+                                pass
 
-                            # Adiciona nas listas EXATAMENTE 1 vez por ativo (Fora do Try/Except)
                             p_atuais.append(p_atual_val)
                             mm200_l.append(mm200_val)
                             max_52w_lista.append(max52_val)
@@ -692,7 +635,6 @@ elif aba_selecionada == "📊 Minha Carteira":
                             vars_pct.append(var_pct_val)
                             divs_12m.append(divs_val)
 
-                        # --- O código continua normalmente abaixo ---
                         carteira['preco_atual'] = p_atuais
                         carteira['dividendos_12m'] = divs_12m
                         carteira['valor_patrimonio_atual'] = carteira['quantidade_total'] * carteira['preco_atual']
@@ -766,13 +708,10 @@ elif aba_selecionada == "📊 Minha Carteira":
             with tab1:
                 st.subheader("📊 Posição B3")
                 if not carteira.empty:
-                    # 1. Criamos uma cópia para não estragar os cálculos que usam o .SA
                     df_view = carteira.copy()
+                    # CORREÇÃO: regex=False para não corromper nomes como B3SA3 ou ITSA4
+                    df_view['ativo'] = df_view['ativo'].str.replace('.SA', '', regex=False).str.upper()
                     
-                    # 2. Limpeza visual: remove o .SA e deixa o ticker em caixa alta
-                    df_view['ativo'] = df_view['ativo'].str.replace('.SA', '', case=False).str.upper()
-                    
-                    # 3. Exibição da Tabela Nativa (Segura e funcional)
                     st.dataframe(
                         df_view[['ativo', 'quantidade_total', 'preco_medio', 'preco_atual', 'Tendência', 'MM200', 'Min_52S', 'Max_52S', 'lucro_prejuizo', 'rentabilidade_%']],
                         use_container_width=True, 
@@ -825,13 +764,12 @@ elif aba_selecionada == "📊 Minha Carteira":
                         data_inicial = (pd.Timestamp.now() - pd.DateOffset(years=1)).strftime('%Y-%m-%d')
                         tickers_list = carteira['ativo'].tolist()
                         
-                        # Usar o histórico para carteira e IBOV
                         dados_h = carregar_dados_historicos(tickers_list + ['^BVSP'], start=data_inicial)
                         
                         if not dados_h.empty:
                             ret_ativos = (dados_h / dados_h.iloc[0]) - 1
                             pesos = carteira.set_index('ativo')['valor_patrimonio_atual'] / patrimonio_b3 if patrimonio_b3 > 0 else 0
-                            cols_carteira = [t for t in tickers_list if t in ret_ativos.columns]
+                            cols_carteira =[t for t in tickers_list if t in ret_ativos.columns]
                             
                             df_comp = pd.DataFrame({
                                 'Minha Carteira': (ret_ativos[cols_carteira] * pesos).sum(axis=1) * 100,
@@ -845,8 +783,13 @@ elif aba_selecionada == "📊 Minha Carteira":
                             if not df_cdi.empty:
                                 df_cdi['Fator'] = 1 + (df_cdi['valor'] / 100)
                                 df_cdi['CDI Acumulado'] = (df_cdi['Fator'].cumprod() - 1) * 100
-                                df_comp.index = df_comp.index.tz_localize(None)
-                                df_cdi.index = df_cdi.index.tz_localize(None)
+                                
+                                # CORREÇÃO: Remoção segura de fuso horário
+                                if getattr(df_comp.index, 'tz', None) is not None:
+                                    df_comp.index = df_comp.index.tz_localize(None)
+                                if getattr(df_cdi.index, 'tz', None) is not None:
+                                    df_cdi.index = df_cdi.index.tz_localize(None)
+                                    
                                 df_comp = df_comp.join(df_cdi['CDI Acumulado'], how='left').ffill().fillna(0)
                                 df_comp.rename(columns={'CDI Acumulado': 'CDI'}, inplace=True)
 
@@ -862,13 +805,9 @@ elif aba_selecionada == "📊 Minha Carteira":
                 if not carteira.empty:
                     total_divs_detectados = carteira['dividendos_12m'].sum()
                     if total_divs_detectados > 0:
-                        # Criamos a cópia filtrada
                         df_com_dividendos = carteira[carteira['dividendos_12m'] > 0].copy()
-            
-                        # --- LIMPEZA DOS TICKERS (.SA fora e CAIXA ALTA) ---
-                        df_com_dividendos['ativo'] = df_com_dividendos['ativo'].str.replace('.SA', '', case=False).str.upper()
-                        
-                        # Criando a Projeção (Média Mensal)
+                        # CORREÇÃO: regex=False para manter segurança do nome do ticker
+                        df_com_dividendos['ativo'] = df_com_dividendos['ativo'].str.replace('.SA', '', regex=False).str.upper()
                         df_com_dividendos['projecao_mensal'] = df_com_dividendos['dividendos_12m'] / 12
                         
                         col_d1, col_d2 = st.columns([1, 1])
@@ -916,20 +855,17 @@ elif aba_selecionada == "📊 Minha Carteira":
                         dados_crise = carregar_dados_historicos(tickers_stress + ['^BVSP'], start=data_inicio, end=data_fim)
                         
                         if not dados_crise.empty and '^BVSP' in dados_crise.columns:
-                            # 1. Filtro de Sobreviventes: Quem já tinha capital aberto nesta crise?
                             primeira_linha = dados_crise.iloc[0]
                             ativos_validos = primeira_linha[primeira_linha > 0].index.tolist()
                             
-                            # 2. Limpa os fantasmas
                             dados_crise = dados_crise[ativos_validos].ffill().fillna(0)
                             retornos_crise = (dados_crise / dados_crise.iloc[0]) - 1
                             
-                            # 3. Recalcula os pesos apenas com as ações válidas
                             ativos_carteira_validos = [t for t in tickers_stress if t in ativos_validos]
                             
                             if ativos_carteira_validos:
                                 pesos_brutos = carteira.set_index('ativo').loc[ativos_carteira_validos, 'valor_patrimonio_atual']
-                                pesos_stress = pesos_brutos / pesos_brutos.sum() # Normaliza para dar 100% da simulação
+                                pesos_stress = pesos_brutos / pesos_brutos.sum()
                                 
                                 df_stress = pd.DataFrame({
                                     'A Minha Carteira': (retornos_crise[ativos_carteira_validos] * pesos_stress).sum(axis=1) * 100,
@@ -956,18 +892,14 @@ elif aba_selecionada == "📊 Minha Carteira":
                 with col_r1:
                     st.subheader("📊 Matriz de Correlação")
                     if st.button("🧬 Gerar Matriz") and not carteira.empty:
-                        # Mantemos o .SA aqui para a função buscar os dados corretamente na API
                         dados_corr = carregar_dados_historicos(carteira['ativo'].tolist(), period="1y")
                         
                         if not dados_corr.empty:
-                            # 1. Calculamos a matriz de correlação
                             corr_matrix = dados_corr.pct_change().dropna().corr()
-                            
-                            # 2. Limpamos os nomes: Removemos .SA e deixamos em MAIÚSCULAS
+                            # Uso do .replace original pois aqui é nível do python, não Series Pandas
                             corr_matrix.columns = [c.replace('.SA', '').upper() for c in corr_matrix.columns]
                             corr_matrix.index = [i.replace('.SA', '').upper() for i in corr_matrix.index]
                             
-                            # 3. Geramos o Heatmap com a matriz já "limpa"
                             fig_corr = px.imshow(
                                 corr_matrix, 
                                 text_auto=".2f", 
@@ -976,8 +908,6 @@ elif aba_selecionada == "📊 Minha Carteira":
                                 zmin=-1, 
                                 zmax=1
                             )
-                            
-                            # Aplicamos sua função de padronização e plotamos
                             st.plotly_chart(padronizar_grafico(fig_corr), use_container_width=True)
                 with col_r2:
                     st.subheader("🌎 Sensibilidade Cambial")
@@ -994,12 +924,10 @@ elif aba_selecionada == "📊 Minha Carteira":
                 yield_desejado = st.slider("Yield Mínimo Desejado (Bazin) %:", 4.0, 12.0, 6.0) / 100
                 if st.button("🔍 Calcular Valuation") and not carteira.empty:
                     with st.spinner("Analisando balanços e histórico de dividendos..."):
-                        val_list = []
+                        val_list =[]
                         for ativo in carteira['ativo']:
                             try:
                                 p_atual = carteira.loc[carteira['ativo'] == ativo, 'preco_atual'].values[0]
-                                
-                                # YFinance p/ fundamentos corretos (Graham)
                                 ticker_yf = ativo.replace('.SA', '') + '.SA'
                                 info = yf.Ticker(ticker_yf).info
                                 lpa = info.get('trailingEps')
@@ -1030,7 +958,7 @@ elif aba_selecionada == "📊 Minha Carteira":
                             mu, sigma = (hist.mean() * pesos).sum(), (hist * pesos).sum(axis=1).std()
                             sims = np.zeros((anos * 252, 100))
                             for s in range(100):
-                                p = [patrimonio_global_total]
+                                p =[patrimonio_global_total]
                                 for _ in range(1, anos * 252): p.append(p[-1] * (1 + np.random.normal(mu, sigma)) + (aporte/21))
                                 sims[:, s] = p
                             
@@ -1062,21 +990,17 @@ elif aba_selecionada == "📊 Minha Carteira":
                 if not carteira.empty:
                     novo_aporte = st.number_input("Valor do Novo Aporte (R$):", value=1000.0, step=100.0)
                     
-                    # Traz a lista completa da B3 para o Autocompletar (sem .SA)
                     lista_completa_b3 = buscar_tickers_brapi()
                     
-                    # 1. Removemos o '.SA' para bater com a lista do Autocompletar perfeitamente
-                    ativos_carteira_limpos = carteira['ativo'].str.replace('.SA', '').tolist()
+                    # CORREÇÃO: regex=False
+                    ativos_carteira_limpos = carteira['ativo'].str.replace('.SA', '', regex=False).tolist()
                     
-                    # 2. Copiloto Profissional: Carrega a % ATUAL da carteira como padrão
                     pesos_atuais = (carteira['valor_patrimonio_atual'] / patrimonio_b3 * 100).round(2).tolist()
                     
-                    # Ajuste fino matemático para garantir que a soma inicial seja cravada em 100.00%
                     if pesos_atuais:
                         diferenca_centavos = 100.0 - sum(pesos_atuais)
                         pesos_atuais[0] = round(pesos_atuais[0] + diferenca_centavos, 2)
                     
-                    # Cria a tabela inicial preenchida com o que ele já tem
                     df_alvos = pd.DataFrame({
                         'Ativo': ativos_carteira_limpos, 
                         'Alvo (%)': pesos_atuais
@@ -1104,7 +1028,6 @@ elif aba_selecionada == "📊 Minha Carteira":
                         }
                     )
                     
-                    # --- A LÓGICA DO COPILOTO (FALTA / SOBRA) ---
                     soma_alvos = alvos_editados['Alvo (%)'].sum()
                     diferenca = 100.0 - soma_alvos
                     
@@ -1119,29 +1042,24 @@ elif aba_selecionada == "📊 Minha Carteira":
                     else:
                         st.error(f"🚨 Você excedeu o limite em **{abs(diferenca):.2f}%**! Reduza as posições. (Soma atual: {soma_alvos:.2f}%)")
 
-                    # O botão só funciona se a matemática bater 100%
                     if pode_calcular and st.button("🚀 Gerar Ordens de Compra/Venda"):
                         with st.spinner("Calculando a rota ideal do seu dinheiro..."):
                             pat_futuro = patrimonio_b3 + novo_aporte
-                            ordens = []
+                            ordens =[]
                             
                             for _, row in alvos_editados.iterrows():
                                 ativo_limpo = str(row['Ativo']).upper().strip()
                                 alvo_pct = row['Alvo (%)'] / 100.0
                                 
-                                # Precisamos devolver o '.SA' para achar a ação na nossa carteira interna
                                 ativo_com_sa = ativo_limpo + '.SA'
                                 
-                                # Verifica se você já tem o ativo
                                 if ativo_com_sa in carteira['ativo'].values:
                                     val_atual = carteira.loc[carteira['ativo'] == ativo_com_sa, 'valor_patrimonio_atual'].values[0]
                                     p_ativo = carteira.loc[carteira['ativo'] == ativo_com_sa, 'preco_atual'].values[0]
                                 else:
-                                    # Se for um ativo NOVO que você adicionou agora na tabela
                                     val_atual = 0.0
                                     p_ativo = obter_preco_atual(ativo_limpo)
                                 
-                                # Calcula a matemática mágica de rebalanceamento
                                 qtd = int((pat_futuro * alvo_pct - val_atual) / p_ativo) if p_ativo > 0 else 0
                                 
                                 if qtd != 0: 
@@ -1186,7 +1104,6 @@ elif aba_selecionada == "📊 Minha Carteira":
                 segmentados por natureza de ativos para uma análise comparativa precisa.
                 """)
                 
-                # Configuração da Lista Mestra
                 fiis_config = {
                     'KNCR11': 'Papel', 'KNIP11': 'Papel', 'MXRF11': 'Papel', 'CPTS11': 'Papel',
                     'HGCR11': 'Papel', 'VRTA11': 'Papel', 'MCCI11': 'Papel', 'JPPC11': 'Papel',
@@ -1200,12 +1117,11 @@ elif aba_selecionada == "📊 Minha Carteira":
                     df_radar = buscar_pvp_fiis(fiis_config)
                     
                     if not df_radar.empty:
-                        # Categorias para renderização
                         secoes = {
                             "📄 Carteiras de Recebíveis (Papel/Dívida)": "Papel",
                             "🚛 Logística e Infraestrutura Industrial": "Logística",
                             "🏢 Lajes Corporativas (Escritórios)": "Lajes",
-                            "🛍️ Varejo, Shoppings e Estruturas Híbridas": ["Shoppings", "Híbrido", "Híbrido/Urbano"]
+                            "🛍️ Varejo, Shoppings e Estruturas Híbridas":["Shoppings", "Híbrido", "Híbrido/Urbano"]
                         }
                         
                         for titulo, filtro in secoes.items():
@@ -1226,11 +1142,9 @@ elif aba_selecionada == "📊 Minha Carteira":
                             else:
                                 st.caption("Aguardando atualização de dados para este segmento...")
 
-                        # --- SEÇÃO TÉCNICA E ADVERTÊNCIAS ---
                         st.divider()
                         st.subheader("🧠 Metodologia e Interpretação Técnica")
                         
-                        # Alerta Principal (O que você pediu)
                         st.warning("""
                         **Nota de Metodologia:** O P/VP é uma métrica quantitativa e estática que reflete a fotografia do momento. 
                         Ela não deve ser utilizada como único critério de decisão, pois não captura variáveis qualitativas como 
