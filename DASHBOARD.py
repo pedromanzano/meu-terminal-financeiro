@@ -385,7 +385,7 @@ elif aba_selecionada == "📊 Minha Carteira":
                     st.warning("Carteira vazia. Use a barra lateral para adicionar seus primeiros ativos!")
                 else:
                     # ==============================================
-                    # 1. MOTOR DE CUSTÓDIA B3 (LÓGICA CRONOLÓGICA)
+                    # 1. MOTOR DE CUSTÓDIA B3 (PREÇO MÉDIO GLOBAL)
                     # ==============================================
                     df_b3_raw = df_base[df_base['mercado'] == 'B3 (Ações/FIIs)'].copy()
                     
@@ -393,42 +393,39 @@ elif aba_selecionada == "📊 Minha Carteira":
                         df_b3_raw['ativo_limpo'] = df_b3_raw['ativo'].str.upper().str.strip()
                         df_b3_raw.loc[~df_b3_raw['ativo_limpo'].str.endswith('.SA'), 'ativo_limpo'] += '.SA'
                         
-                        # Ordenar cronologicamente para a matemática funcionar perfeito
-                        df_b3_raw = df_b3_raw.sort_values(by='id')
-                        
-                        posicoes_b3 = {}
-                        for _, row in df_b3_raw.iterrows():
-                            ativo = row['ativo_limpo']
-                            tipo = row['tipo']
-                            qtd = float(row['quantidade'])
-                            preco = float(row['preco'])
+                        posicoes_b3 =[]
+                        for ativo, df_ativo in df_b3_raw.groupby('ativo_limpo'):
+                            compras = df_ativo[df_ativo['tipo'] == 'Compra']
+                            vendas = df_ativo[df_ativo['tipo'] == 'Venda']
                             
-                            if ativo not in posicoes_b3: 
-                                posicoes_b3[ativo] = {'qtd': 0.0, 'pm': 0.0, 'lucro_realizado': 0.0}
-                                
-                            p = posicoes_b3[ativo]
+                            qtd_comprada = compras['quantidade'].astype(float).sum()
+                            custo_comprado = (compras['quantidade'].astype(float) * compras['preco'].astype(float)).sum()
                             
-                            if tipo == 'Compra':
-                                nova_qtd = p['qtd'] + qtd
-                                p['pm'] = ((p['qtd'] * p['pm']) + (qtd * preco)) / nova_qtd if nova_qtd > 0 else 0
-                                p['qtd'] = nova_qtd
-                            elif tipo == 'Venda':
-                                # EXATAMENTE A MATEMÁTICA PEDIDA: Lucro = Qtd * (Preço Venda - PM)
-                                p['lucro_realizado'] += qtd * (preco - p['pm'])
-                                p['qtd'] -= qtd
+                            pm_global = custo_comprado / qtd_comprada if qtd_comprada > 0 else 0.0
+                            
+                            qtd_vendida = vendas['quantidade'].astype(float).sum()
+                            receita_vendas = (vendas['quantidade'].astype(float) * vendas['preco'].astype(float)).sum()
+                            
+                            qtd_atual = qtd_comprada - qtd_vendida
+                            
+                            # Se nunca cadastrou compra, não inventamos lucro pra não causar erro matemático
+                            if qtd_comprada == 0:
+                                lucro_realizado = 0.0
+                            else:
+                                lucro_realizado = receita_vendas - (qtd_vendida * pm_global)
                                 
-                                # Limpeza contra dízimas (o computador salva 0.0 como 0.000000001 às vezes)
-                                if p['qtd'] <= 0.0001:  
-                                    p['qtd'] = 0.0
-                                    p['pm'] = 0.0
-                                    
-                        df_pos_b3 = pd.DataFrame.from_dict(posicoes_b3, orient='index').reset_index()
-                        df_pos_b3.rename(columns={'index': 'ativo', 'qtd': 'quantidade_total', 'pm': 'preco_medio'}, inplace=True)
-                        
+                            posicoes_b3.append({
+                                'ativo': ativo,
+                                'quantidade_total': qtd_atual,
+                                'preco_medio': pm_global,
+                                'lucro_realizado': lucro_realizado
+                            })
+                            
+                        df_pos_b3 = pd.DataFrame(posicoes_b3)
                         lucro_realizado_b3 = df_pos_b3['lucro_realizado'].sum()
                         
-                        # SE O ATIVO FOR ZERADO ELE NÃO ENTRA AQUI E SOME DA CARTEIRA
-                        carteira = df_pos_b3[df_pos_b3['quantidade_total'] > 0.0001].copy()
+                        # FILTRO MÁGICO CONTRA "AÇÕES FANTASMAS": Só passa se for maior que 0.0000 estrito
+                        carteira = df_pos_b3[df_pos_b3['quantidade_total'].round(4) > 0].copy()
 
                         p_atuais, mm200_l, max_52w_lista, min_52w_lista, vars_pct, divs_12m = [], [], [], [], [],[]
 
@@ -483,7 +480,6 @@ elif aba_selecionada == "📊 Minha Carteira":
                             patrimonio_b3 = carteira['valor_patrimonio_atual'].sum()
                             investido_b3 = carteira['custo_total'].sum()
 
-                        # Matemática Final Total Global da Carteira
                         lucro_b3_reais = lucro_realizado_b3 + (patrimonio_b3 - investido_b3)
                         rentabilidade_b3_pct = (lucro_b3_reais / investido_b3 * 100) if investido_b3 > 0 else 0
 
@@ -492,28 +488,32 @@ elif aba_selecionada == "📊 Minha Carteira":
                     # ==============================================
                     df_c_raw = df_base[df_base['mercado'] == 'Criptomoedas'].copy()
                     if not df_c_raw.empty:
-                        df_c_raw = df_c_raw.sort_values(by='id')
-                        posicoes_c = {}
-                        for _, row in df_c_raw.iterrows():
-                            ativo, tipo, qtd, preco = row['ativo'], row['tipo'], float(row['quantidade']), float(row['preco'])
-                            if ativo not in posicoes_c: posicoes_c[ativo] = {'qtd': 0.0, 'pm': 0.0, 'lucro_realizado': 0.0}
-                            p = posicoes_c[ativo]
+                        posicoes_c =[]
+                        for ativo, df_ativo in df_c_raw.groupby('ativo'):
+                            compras = df_ativo[df_ativo['tipo'] == 'Compra']
+                            vendas = df_ativo[df_ativo['tipo'] == 'Venda']
                             
-                            if tipo == 'Compra':
-                                nova_qtd = p['qtd'] + qtd
-                                p['pm'] = ((p['qtd'] * p['pm']) + (qtd * preco)) / nova_qtd if nova_qtd > 0 else 0
-                                p['qtd'] = nova_qtd
-                            elif tipo == 'Venda':
-                                p['lucro_realizado'] += qtd * (preco - p['pm'])
-                                p['qtd'] -= qtd
-                                if p['qtd'] <= 0.000001:
-                                    p['qtd'], p['pm'] = 0.0, 0.0
-                                    
-                        df_pos_c = pd.DataFrame.from_dict(posicoes_c, orient='index').reset_index()
-                        df_pos_c.rename(columns={'index': 'Ativo Cripto', 'qtd': 'Quantidade', 'pm': 'Preço Médio'}, inplace=True)
+                            qtd_c = compras['quantidade'].astype(float).sum()
+                            custo_c = (compras['quantidade'].astype(float) * compras['preco'].astype(float)).sum()
+                            pm_c = custo_c / qtd_c if qtd_c > 0 else 0.0
+                            
+                            qtd_v = vendas['quantidade'].astype(float).sum()
+                            receita_v = (vendas['quantidade'].astype(float) * vendas['preco'].astype(float)).sum()
+                            
+                            qtd_atual = qtd_c - qtd_v
+                            lucro_r = receita_v - (qtd_v * pm_c) if qtd_c > 0 else 0.0
+                            
+                            posicoes_c.append({
+                                'Ativo Cripto': ativo,
+                                'Quantidade': qtd_atual,
+                                'Preço Médio': pm_c,
+                                'lucro_realizado': lucro_r
+                            })
+                            
+                        df_pos_c = pd.DataFrame(posicoes_c)
                         lucro_realizado_cripto = df_pos_c['lucro_realizado'].sum()
                         
-                        df_cripto = df_pos_c[df_pos_c['Quantidade'] > 0.000001].copy()
+                        df_cripto = df_pos_c[df_pos_c['Quantidade'].round(6) > 0].copy()
                         if not df_cripto.empty:
                             df_cripto['Preço Atual (R$)'] = df_cripto['Ativo Cripto'].apply(obter_preco_cripto)
                             df_cripto['Valor Atual (R$)'] = df_cripto['Quantidade'] * df_cripto['Preço Atual (R$)']
@@ -527,10 +527,13 @@ elif aba_selecionada == "📊 Minha Carteira":
                     # ==============================================
                     df_rf_raw = df_base[df_base['mercado'] == 'Renda Fixa'].copy()
                     if not df_rf_raw.empty:
-                        # Para RF multiplicamos o preço de emissão pela qtd para abater exato na venda
-                        df_rf_raw['valor_adj'] = np.where(df_rf_raw['tipo'] == 'Compra', df_rf_raw['preco'] * df_rf_raw['quantidade'], -df_rf_raw['preco'] * df_rf_raw['quantidade'])
+                        df_rf_raw['valor_adj'] = np.where(df_rf_raw['tipo'] == 'Compra', 
+                                                          df_rf_raw['preco'].astype(float) * df_rf_raw['quantidade'].astype(float), 
+                                                          -df_rf_raw['preco'].astype(float) * df_rf_raw['quantidade'].astype(float))
                         df_rf = df_rf_raw.groupby('ativo')['valor_adj'].sum().reset_index().rename(columns={'ativo': 'Ativo RF', 'valor_adj': 'Valor Atual'})
-                        df_rf = df_rf[df_rf['Valor Atual'] > 0.01] 
+                        
+                        # Filtro mágico com round
+                        df_rf = df_rf[df_rf['Valor Atual'].round(2) > 0] 
                         saldo_renda_fixa = df_rf['Valor Atual'].sum()
 
             # --- RENDERIZAÇÃO DO DASHBOARD ---
@@ -711,8 +714,8 @@ elif aba_selecionada == "📊 Minha Carteira":
                         dados_corr = carregar_dados_historicos(carteira['ativo'].tolist(), period="1y")
                         if not dados_corr.empty:
                             corr_matrix = dados_corr.pct_change().dropna().corr()
-                            corr_matrix.columns = [c.replace('.SA', '').upper() for c in corr_matrix.columns]
-                            corr_matrix.index = [i.replace('.SA', '').upper() for i in corr_matrix.index]
+                            corr_matrix.columns =[c.replace('.SA', '').upper() for c in corr_matrix.columns]
+                            corr_matrix.index =[i.replace('.SA', '').upper() for i in corr_matrix.index]
                             
                             fig_corr = px.imshow(
                                 corr_matrix, 
