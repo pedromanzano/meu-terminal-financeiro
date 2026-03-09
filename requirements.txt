@@ -9,3 +9,4 @@ xlrd
 streamlit-authenticator
 supabase
 google-generativeai
+streamlit-option-menu
