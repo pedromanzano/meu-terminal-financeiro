@@ -1,222 +1,37 @@
-import streamlit as st
-import time
-import pandas as pd
-import plotly.express as px
-import numpy as np
-import urllib.request
-import json
-import os
-from datetime import date
-import requests
-import streamlit_authenticator as stauth
-from supabase import create_client, Client
+import logging
 import urllib.parse
 import xml.etree.ElementTree as ET
-import yfinance as yf
-import plotly.graph_objects as go
+
 import google.generativeai as genai
+import numpy as np
+import pandas as pd
+import plotly.express as px
+import plotly.graph_objects as go
+import streamlit as st
+import yfinance as yf
+
+import auth
+import components
+import config
+import data
+
+logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s %(message)s")
+logger = logging.getLogger(__name__)
 
 # ==========================================
 # 1. CONFIGURAÇÃO DA PÁGINA E CSS
 # ==========================================
 st.set_page_config(page_title="InvestiCortes Terminal", layout="wide", initial_sidebar_state="expanded")
+st.markdown(config.PAGE_CSS, unsafe_allow_html=True)
 
-st.markdown("""
-<style>
-    div[data-testid="metric-container"] { background-color: rgba(40, 40, 40, 0.4); border: 1px solid rgba(255, 255, 255, 0.1); padding: 15px; border-radius: 8px; box-shadow: 0px 4px 10px rgba(0, 0, 0, 0.2); }
-    div[data-testid="stVerticalBlock"] > div[style*="border"] { padding: 1rem; }
-    .stDeployButton { display: none !important; }
-    #MainMenu { visibility: hidden !important; }
-    footer { visibility: hidden !important; }
-    .block-container { padding-top: 2rem !important; padding-bottom: 1rem !important; }
-</style>
-""", unsafe_allow_html=True)
-
-# Token Global da BRAPI
-TOKEN_BRAPI = "ggEB4pbTMNTydMJmFNKX6M"
-
-def padronizar_grafico(fig):
-    fig.update_layout(
-        paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
-        hoverlabel=dict(bgcolor="rgba(20, 20, 20, 0.95)", font_color="white", font_size=14, bordercolor="#444"),
-        font=dict(color="#E0E0E0"), margin=dict(t=50, l=10, r=10, b=10)
-    )
-    return fig
+# Token BRAPI via secrets (não hardcoded)
+token_brapi = st.secrets.get("BRAPI_TOKEN") or ""
 
 # ==========================================
-# ⚡ MOTOR DE DADOS (HÍBRIDO: BRAPI + YFINANCE)
+# 🔐 BANCO DE DADOS E AUTENTICAÇÃO
 # ==========================================
-
-@st.cache_data(ttl=86400, show_spinner=False)
-def buscar_tickers_brapi(pesquisa=None):
-    """Busca a lista oficial de ações direto na API da B3."""
-    url = f"https://brapi.dev/api/quote/list?token={TOKEN_BRAPI}"
-    if pesquisa: url += f"&search={pesquisa}"
-    try:
-        resp = requests.get(url, timeout=10).json()
-        return[acao['stock'] for acao in resp.get('stocks',[])]
-    except:
-        return["PETR4", "VALE3", "ITUB4", "BBDC4", "WEGE3"]
-
-@st.cache_data(ttl=300, show_spinner=False)
-def obter_preco_atual(ticker):
-    """Cotação em tempo real B3 (via BRAPI)"""
-    ticker_limpo = ticker.replace('.SA', '')
-    url = f"https://brapi.dev/api/quote/{ticker_limpo}?token={TOKEN_BRAPI}"
-    try:
-        dados = requests.get(url, timeout=5).json()
-        return float(dados['results'][0]['regularMarketPrice'])
-    except:
-        try: 
-            df_hist = yf.Ticker(ticker_limpo + ".SA").history(period="1d")
-            if not df_hist.empty: return float(df_hist['Close'].iloc[-1])
-            return 0.0
-        except: return 0.0
-
-@st.cache_data(ttl=3600, show_spinner=False)
-def obter_dividendos(ticker):
-    """Busca dividendos reais (Híbrido YFinance + BRAPI) e remove fusos horários de forma segura"""
-    ticker_limpo = ticker.replace('.SA', '')
-    try:
-        acao = yf.Ticker(ticker_limpo + ".SA")
-        divs = acao.dividends
-        if not divs.empty:
-            if getattr(divs.index, 'tz', None) is not None:
-                divs.index = divs.index.tz_localize(None)
-            return divs
-    except: pass
-    
-    try:
-        url = f"https://brapi.dev/api/quote/{ticker_limpo}?token={TOKEN_BRAPI}&dividends=true"
-        dados = requests.get(url, timeout=5).json()
-        divs_list = dados['results'][0].get('dividendsData', {}).get('cashDividends',[])
-        if divs_list:
-            df = pd.DataFrame(divs_list)
-            col_valor = 'rate' if 'rate' in df.columns else 'assetIssuedDividend'
-            df['date'] = pd.to_datetime(df['paymentDate'])
-            if getattr(df['date'].dt, 'tz', None) is not None:
-                df['date'] = df['date'].dt.tz_localize(None)
-            df.set_index('date', inplace=True)
-            return df[col_valor]
-    except: pass
-    return pd.Series()
-
-@st.cache_data(ttl=3600, show_spinner=False)
-def carregar_dados_historicos(tickers, start=None, end=None, period="1y"):
-    """Motor Histórico YFinance blindado"""
-    if isinstance(tickers, str): tickers = [tickers]
-    tickers_yf =[t + ".SA" if not t.endswith('.SA') and not t.startswith('^') and "=" not in t else t for t in tickers]
-    try:
-        kwargs = {'progress': False}
-        if start and end: kwargs['start'], kwargs['end'] = start, end
-        else: kwargs['period'] = period
-            
-        df = yf.download(tickers_yf, **kwargs)['Close']
-        
-        if isinstance(df, pd.Series): df = df.to_frame(name=tickers[0])
-        else:
-            mapa_nomes = {yf_ticker: original for yf_ticker, original in zip(tickers_yf, tickers)}
-            df.rename(columns=mapa_nomes, inplace=True)
-        return df.ffill()
-    except Exception as e: return pd.DataFrame()
-
-@st.cache_data(ttl=300, show_spinner=False)
-def obter_preco_cripto(ticker):
-    moeda = str(ticker).upper().strip().split('-')[0]
-    try:
-        req = urllib.request.Request(f"https://www.mercadobitcoin.net/api/{moeda}/ticker/", headers={'User-Agent': 'Mozilla/5.0'})
-        with urllib.request.urlopen(req, timeout=3) as response:
-            return float(json.loads(response.read().decode())['ticker']['last'])
-    except: return 0.0
-
-@st.cache_data(ttl=86400, show_spinner=False)
-def carregar_cdi_historico(data_inicio, data_fim):
-    try:
-        url_cdi = f"https://api.bcb.gov.br/dados/serie/bcdata.sgs.12/dados?formato=json&dataInicial={data_inicio}&dataFinal={data_fim}"
-        df_cdi = pd.read_json(url_cdi)
-        df_cdi['data'] = pd.to_datetime(df_cdi['data'], dayfirst=True)
-        df_cdi.set_index('data', inplace=True)
-        return df_cdi
-    except: return pd.DataFrame()
-
-@st.cache_data(ttl=3600, show_spinner=False)
-def buscar_pvp_fiis(lista_fiis_config):
-    dados =[]
-    for fii, segmento in lista_fiis_config.items():
-        try:
-            ticker_nome = f"{fii.strip()}.SA"
-            info = yf.Ticker(ticker_nome).info
-            preco_atual = info.get('previousClose') or info.get('regularMarketPrice') or 0.0
-            vpa = info.get('bookValue') or 0.0
-            pvp = info.get('priceToBook')
-            if (pvp is None or pvp == 0) and vpa > 0: pvp = preco_atual / vpa
-            dy_bruto = info.get('dividendYield') or info.get('trailingAnnualDividendYield', 0.0)
-            dy_pct = (dy_bruto if (dy_bruto and dy_bruto > 1) else (dy_bruto * 100 if dy_bruto else 0.0))
-
-            if pvp and pvp > 0:
-                if segmento == 'Papel':
-                    status_texto = "🟢 Paridade" if 0.98 <= pvp <= 1.02 else ("🟠 Alerta: Risco" if pvp < 0.98 else "🔴 Ágio")
-                else:
-                    status_texto = "🟢 Desconto" if pvp < 1.0 else "🔴 Ágio"
-                dados.append({'FII': fii, 'Tipo': segmento, 'Preço': preco_atual, 'VPA': vpa, 'P/VP': pvp, 'DY Anual (%)': dy_pct, 'DY Mensal Est. (%)': dy_pct / 12, 'Status': status_texto})
-        except: continue
-    return pd.DataFrame(dados)
-
-@st.cache_data(ttl=600)
-def scanner_volume_atipico():
-    tickers =['VALE3.SA', 'PETR4.SA', 'ITUB4.SA', 'BBDC4.SA', 'ABEV3.SA', 'MGLU3.SA', 'B3SA3.SA', 'BBAS3.SA', 'RENT3.SA', 'WEGE3.SA', 'HAPV3.SA', 'GGBR4.SA', 'PRIO3.SA', 'ELET3.SA', 'SUZB3.SA', 'CSAN3.SA', 'LREN3.SA', 'RADL3.SA', 'RAIL3.SA', 'JBSS3.SA', 'VBBR3.SA', 'CPLE6.SA', 'EQTL3.SA']
-    import datetime
-    agora = datetime.datetime.now()
-    inicio = agora.replace(hour=10, minute=0, second=0)
-    proporcao_esperada = min(max((agora - inicio).total_seconds() / 60, 1) / 420, 1.0)
-    anomalias =[]
-    try:
-        data = yf.download(tickers, period="5d", interval="5m", progress=False)
-        if data.empty: return pd.DataFrame()
-        for t in tickers:
-            try:
-                hoje_v = data['Volume'][t].dropna()
-                hoje_p = data['Close'][t].dropna()
-                if hoje_v.empty: continue
-                vol_hoje, preco_atual, preco_abertura = hoje_v.sum(), hoje_p.iloc[-1], hoje_p.iloc[0]
-                media_vol_20d = yf.Ticker(t).history(period="25d")['Volume'].iloc[-21:-1].mean()
-                vol_esperado = media_vol_20d * proporcao_esperada
-                rvol = vol_hoje / vol_esperado if vol_esperado > 0 else 0
-                var_dia = ((preco_atual / preco_abertura) - 1) * 100
-                if rvol > 0.8:
-                    fluxo = "🏦 Institucional" if rvol > 1.2 else "⚖️ Fluxo Normal"
-                    fluxo += " (Compra)" if var_dia > 0.2 else (" (Venda)" if var_dia < -0.2 else " (Lateral)")
-                    ticker_limpo = t.replace('.SA', '').upper()
-                    anomalias.append({'Logo': f"https://static.itaucpa.com.br/itau-corretora/logos-acoes/{ticker_limpo}.png", 'Ativo': ticker_limpo, 'Ritmo (RVOL)': f"{rvol:.2f}x", 'Variação': f"{var_dia:+.2f}%", 'Análise de Fluxo': fluxo, 'score': rvol})
-            except: continue
-    except: pass
-    df = pd.DataFrame(anomalias)
-    return df.sort_values(by='score', ascending=False).head(8).drop(columns=['score']) if not df.empty else pd.DataFrame()
-
-def style_pvp_inteligente(row):
-    status = row['Status']
-    if "🟢" in status: return['color: #00CC96; font-weight: bold'] * len(row)
-    elif "🟠" in status: return['color: #FFA500; font-weight: bold'] * len(row)
-    else: return['color: #EF553B; font-weight: bold'] * len(row)
-
-# ==========================================
-# 🔐 CONEXÃO BANCO DE DADOS E AUTENTICAÇÃO
-# ==========================================
-try:
-    url = st.secrets.get("SUPABASE_URL")
-    key = st.secrets.get("SUPABASE_KEY")
-    if not url or not key:
-        st.error("⚠️ Banco de dados não configurado. Adicione SUPABASE_URL e SUPABASE_KEY no secrets.toml.")
-        st.stop()
-    supabase: Client = create_client(url, key)
-except Exception as e:
-    st.error(f"Erro ao inicializar o Supabase: {e}")
-    st.stop()
-
-credentials = {
-    "usernames": { "admin": { "name": "Pedro Admin", "password": "$2b$12$eaa2xg5WmNGWTfJL8Y09buVjlBAThqlMwsogcnyYfUFodd3VZt6jO" } }
-}
-authenticator = stauth.Authenticate(credentials, "investimentos_dashboard", "chave_secreta_123", cookie_expiry_days=30)
+supabase = auth.get_supabase()
+authenticator = auth.get_authenticator()
 
 # ==========================================
 # 🧭 MENU LATERAL (NAVEGAÇÃO E FORMULÁRIO)
@@ -229,7 +44,7 @@ with st.sidebar:
         st.divider()
         st.subheader("➕ Nova Transação")
         
-        lista_acoes = buscar_tickers_brapi()
+        lista_acoes = data.buscar_tickers_brapi(token_brapi)
         lista_acoes_atual =["BTC", "ETH", "SOL", "USDT"] + lista_acoes
         f_mercado = st.selectbox("Mercado",["B3 (Ações/FIIs)", "Criptomoedas", "Renda Fixa"])
         
@@ -264,7 +79,9 @@ with st.sidebar:
                                 supabase.table("transacoes").delete().eq("id", ordem['id']).execute()
                                 st.rerun()
                         st.divider()
-            except: st.error("Erro ao carregar ordens.")
+            except Exception as e:
+                logger.exception("Erro ao carregar ordens")
+                st.error("Erro ao carregar ordens.")
 
         st.divider()
         st.subheader("📥 Importação Automática (B3)")
@@ -319,7 +136,9 @@ with st.sidebar:
                             response = model.generate_content(f"Aja como um analista de investimentos sênior focado em B3. Usuário: {prompt}")
                             st.markdown(response.text)
                             st.session_state.chat_history.append({"role": "assistant", "content": response.text})
-                        except: st.error("I.A. indisponível no momento.")
+                        except Exception as e:
+                            logger.exception("IA indisponível")
+                            st.error("I.A. indisponível no momento.")
 
 # ==========================================
 # 🏠 PÁGINA 1: HOME PÚBLICA
@@ -332,34 +151,25 @@ if aba_selecionada == "🏠 Home (Mercado)":
     cols = st.columns(len(indices))
     
     for i, (ticker, nome) in enumerate(indices.items()):
-        data = yf.Ticker(ticker).history(period="2d")
-        if len(data) > 1:
-            valor = data['Close'].iloc[-1]
-            cols[i].metric(nome, f"{valor:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."), f"{((valor / data['Close'].iloc[-2]) - 1) * 100:+.2f}%")
+        df_indice = yf.Ticker(ticker).history(period="2d")
+        if len(df_indice) > 1:
+            valor = df_indice['Close'].iloc[-1]
+            cols[i].metric(nome, f"{valor:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."), f"{((valor / df_indice['Close'].iloc[-2]) - 1) * 100:+.2f}%")
     
-    st.divider()
-    col_s1, col_s2 = st.columns([1, 1])
-    
-    with col_s1:
-        st.write("### 🌡️ Índice de Volatilidade (Fear & Greed)")
-        sentimento = 62 
-        fig = go.Figure(go.Indicator(mode = "gauge+number", value = sentimento, gauge = {'axis': {'range':[0, 100]}, 'bar': {'color': "#00CC96" if sentimento > 50 else "#EF553B"}, 'steps': [{'range':[0, 30], 'color': "#ff4b4b"}, {'range':[30, 70], 'color': "#ffffff"}, {'range':[70, 100], 'color': "#00cc96"}]} ))
-        fig.update_layout(height=280, margin=dict(l=20, r=20, t=50, b=20), paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)')
-        st.plotly_chart(fig, use_container_width=True)
-
-    with col_s2:
-        st.write("### 📈 Fluxo Institucional (Smart Money)")
-        with st.spinner("Rastreando ordens institucionais..."):
-            df_fluxo = scanner_volume_atipico()
-            if not df_fluxo.empty:
-                st.dataframe(df_fluxo.dropna(subset=['Logo']).style.map(lambda x: 'color: #00CC96; font-weight: bold' if 'Compra' in str(x) else ('color: #EF553B; font-weight: bold' if 'Venda' in str(x) else ''), subset=['Análise de Fluxo']), use_container_width=True, hide_index=True, column_config={"Logo": st.column_config.ImageColumn(" ", width="small")})
-            else: st.info("Aguardando abertura ou processamento de dados.")
-
     st.divider()
     c1, c2, c3 = st.columns(3)
-    c1.metric("Top Dividend Yield", "BBAS3", "11.4% aa")
-    c2.metric("Menor P/L", "TUSA4", "3.1x")
-    c3.metric("Desconto Patrimonial", "PFRM3", "P/VP: 0.62")
+    c1.metric("Top Dividend Yield", "—", "N/D")
+    c2.metric("Menor P/L", "—", "N/D")
+    c3.metric("Desconto Patrimonial", "—", "N/D")
+
+    st.divider()
+    st.write("### 📈 Fluxo Institucional (Smart Money)")
+    with st.spinner("Rastreando ordens institucionais..."):
+        df_fluxo = data.scanner_volume_atipico()
+        if not df_fluxo.empty:
+            st.dataframe(df_fluxo.dropna(subset=['Logo']).style.map(lambda x: 'color: #00CC96; font-weight: bold' if 'Compra' in str(x) else ('color: #EF553B; font-weight: bold' if 'Venda' in str(x) else ''), subset=['Análise de Fluxo']), use_container_width=True, hide_index=True, column_config={"Logo": st.column_config.ImageColumn(" ", width="small")})
+        else:
+            st.info("Aguardando abertura ou processamento de dados.")
 
 # ==========================================
 # 📊 PÁGINA 2: ÁREA RESTRITA (DASHBOARD)
@@ -437,8 +247,8 @@ elif aba_selecionada == "📊 Minha Carteira":
                                 p_atual_val, mm200_val, max52_val, min52_val, var_pct_val, divs_val = 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
                                 
                                 try:
-                                    p_atual_val = obter_preco_atual(ticker)
-                                    df_hist_rapido = carregar_dados_historicos(ticker, period="1y")
+                                    p_atual_val = data.obter_preco_atual(token_brapi, ticker)
+                                    df_hist_rapido = data.carregar_dados_historicos(ticker, period="1y")
                                     
                                     if not df_hist_rapido.empty:
                                         mm200_val = df_hist_rapido[ticker].rolling(200).mean().iloc[-1] if len(df_hist_rapido) >= 200 else df_hist_rapido[ticker].mean()
@@ -450,7 +260,7 @@ elif aba_selecionada == "📊 Minha Carteira":
 
                                     var_pct_val = ((p_atual_val / p_ant) - 1) * 100 if p_ant > 0 else 0
                                     
-                                    hist_div = obter_dividendos(ticker)
+                                    hist_div = data.obter_dividendos(token_brapi, ticker)
                                     if not hist_div.empty:
                                         if getattr(hist_div.index, 'tz', None) is not None: hist_div.index = hist_div.index.tz_localize(None)
                                         data_corte = pd.Timestamp.now().replace(tzinfo=None) - pd.DateOffset(years=1)
@@ -515,7 +325,7 @@ elif aba_selecionada == "📊 Minha Carteira":
                         
                         df_cripto = df_pos_c[df_pos_c['Quantidade'].round(6) > 0].copy()
                         if not df_cripto.empty:
-                            df_cripto['Preço Atual (R$)'] = df_cripto['Ativo Cripto'].apply(obter_preco_cripto)
+                            df_cripto['Preço Atual (R$)'] = df_cripto['Ativo Cripto'].apply(data.obter_preco_cripto)
                             df_cripto['Valor Atual (R$)'] = df_cripto['Quantidade'] * df_cripto['Preço Atual (R$)']
                             valor_criptos_total = df_cripto['Valor Atual (R$)'].sum()
                             investido_criptos_total = (df_cripto['Quantidade'] * df_cripto['Preço Médio']).sum()
@@ -573,11 +383,14 @@ elif aba_selecionada == "📊 Minha Carteira":
 
                 if not carteira.empty:
                     df_view = carteira.copy()
-                    
+                    df_view.insert(0, "Logo", df_view["ativo"].str.replace(".SA", "", regex=False).apply(
+                        lambda t: f"https://static.itaucpa.com.br/itau-corretora/logos-acoes/{t}.png"
+                    ))
                     st.dataframe(
-                        df_view[['ativo', 'quantidade_total', 'preco_medio', 'preco_atual', 'Tendência', 'MM200', 'lucro_prejuizo_nao_realizado', 'rentabilidade_%']],
+                        df_view[["Logo", "ativo", "quantidade_total", "preco_medio", "preco_atual", "Tendência", "MM200", "lucro_prejuizo_nao_realizado", "rentabilidade_%"]],
                         use_container_width=True, hide_index=True,
                         column_config={
+                            "Logo": st.column_config.ImageColumn(" ", width="small"),
                             "ativo": "Ativo", "quantidade_total": st.column_config.NumberColumn("Qtd", format="%d"),
                             "preco_medio": st.column_config.NumberColumn("PM", format="R$ %.2f"),
                             "preco_atual": st.column_config.NumberColumn("Atual", format="R$ %.2f"),
@@ -600,7 +413,7 @@ elif aba_selecionada == "📊 Minha Carteira":
                         fig_tree = px.treemap(carteira, path=['ativo'], values='valor_patrimonio_atual', color='var_dia_pct', color_continuous_scale='RdYlGn', color_continuous_midpoint=0, custom_data=['font_size', 'hover_patrimonio', 'hover_var_pct', 'hover_var_reais'])
                         fig_tree.update_traces(textposition="middle center", texttemplate="<span style='font-size:%{customdata[0]}px'><b>%{label}</b></span><br><span style='font-size:%{customdata[0]}px'>%{customdata[2]}</span>", hovertemplate="<b>%{label}</b><br>Patrimônio: %{customdata[1]}<br>Variação Dia: %{customdata[2]}<br>Impacto: <b>%{customdata[3]}</b><extra></extra>", marker=dict(line=dict(width=2, color='rgba(20, 20, 20, 0.8)'), pad=dict(t=2, l=2, r=2, b=2)))
                         fig_tree.update_layout(coloraxis_showscale=False)
-                        st.plotly_chart(padronizar_grafico(fig_tree), use_container_width=True)
+                        st.plotly_chart(components.padronizar_grafico(fig_tree), use_container_width=True)
                 
                 with col_t2:
                     st.subheader("🍕 Distribuição Global")
@@ -612,7 +425,7 @@ elif aba_selecionada == "📊 Minha Carteira":
                     if pizza_data:
                         fig_pie = px.pie(pd.DataFrame(pizza_data), values='Valor', names='Ativo', hole=0.4, color_discrete_sequence=px.colors.sequential.Teal)
                         fig_pie.update_traces(textposition='inside', textinfo='percent+label', hovertemplate="<b>%{label}</b><br>Patrimônio: <b>R$ %{value:,.2f}</b><br>Fatia: %{percent}<extra></extra>")
-                        st.plotly_chart(padronizar_grafico(fig_pie.update_layout(showlegend=False)), use_container_width=True)
+                        st.plotly_chart(components.padronizar_grafico(fig_pie.update_layout(showlegend=False)), use_container_width=True)
 
                 st.divider()
                 st.subheader("📈 Desempenho Acumulado: Carteira vs Benchmarks")
@@ -621,7 +434,7 @@ elif aba_selecionada == "📊 Minha Carteira":
                         data_inicial = (pd.Timestamp.now() - pd.DateOffset(years=1)).strftime('%Y-%m-%d')
                         tickers_list = carteira['ativo'].tolist()
                         
-                        dados_h = carregar_dados_historicos(tickers_list + ['^BVSP'], start=data_inicial)
+                        dados_h = data.carregar_dados_historicos(tickers_list + ['^BVSP'], start=data_inicial)
                         
                         if not dados_h.empty:
                             ret_ativos = (dados_h / dados_h.iloc[0]) - 1
@@ -633,7 +446,7 @@ elif aba_selecionada == "📊 Minha Carteira":
                                 'Ibovespa': ret_ativos['^BVSP'] * 100 if '^BVSP' in ret_ativos.columns else 0
                             }).ffill().fillna(0)
 
-                            df_cdi = carregar_cdi_historico((pd.Timestamp.now() - pd.DateOffset(years=1)).strftime('%d/%m/%Y'), pd.Timestamp.now().strftime('%d/%m/%Y'))
+                            df_cdi = data.carregar_cdi_historico((pd.Timestamp.now() - pd.DateOffset(years=1)).strftime('%d/%m/%Y'), pd.Timestamp.now().strftime('%d/%m/%Y'))
                             if not df_cdi.empty:
                                 df_cdi['Fator'] = 1 + (df_cdi['valor'] / 100)
                                 df_cdi['CDI Acumulado'] = (df_cdi['Fator'].cumprod() - 1) * 100
@@ -646,7 +459,7 @@ elif aba_selecionada == "📊 Minha Carteira":
                             fig_comp = px.line(df_comp, color_discrete_map=cores_grafico, labels={'index': 'Período', 'value': 'Rentabilidade (%)', 'variable': 'Benchmark'})
                             fig_comp.update_traces(hovertemplate="<b>%{fullData.name}</b><br>Data: %{x|%d/%m/%Y}<br>Retorno: <b>%{y:.2f}%</b><extra></extra>")
                             fig_comp.update_xaxes(title_text=""); fig_comp.update_yaxes(title_text="")
-                            st.plotly_chart(padronizar_grafico(fig_comp), use_container_width=True)
+                            st.plotly_chart(components.padronizar_grafico(fig_comp), use_container_width=True)
 
             with tab2:
                 st.subheader("💰 Histórico e Projeção de Proventos")
@@ -668,7 +481,7 @@ elif aba_selecionada == "📊 Minha Carteira":
                         with col_d2:
                             st.write("### 📊 Projeção de Renda por Ativo")
                             fig_div_bar = px.bar(df_com_dividendos, x='ativo', y='dividendos_12m', color_discrete_sequence=['#00CC96'], labels={'ativo': 'Ativo', 'dividendos_12m': 'Proventos (R$)'})
-                            st.plotly_chart(padronizar_grafico(fig_div_bar.update_xaxes(title_text="").update_yaxes(title_text="")), use_container_width=True)
+                            st.plotly_chart(components.padronizar_grafico(fig_div_bar.update_xaxes(title_text="").update_yaxes(title_text="")), use_container_width=True)
                     else: st.info("⚠️ Nenhuma renda passiva mapeada (verifique se os ativos pagam dividendos).")
                 else: st.warning("Adicione ativos para ver a análise de proventos.")
 
@@ -682,7 +495,7 @@ elif aba_selecionada == "📊 Minha Carteira":
                     data_fim = (pd.to_datetime(data_inicio) + pd.DateOffset(days=30)).strftime('%Y-%m-%d')
                     tickers_stress = carteira['ativo'].tolist()
                     with st.spinner(f"Viajando no tempo para {data_inicio}..."):
-                        dados_crise = carregar_dados_historicos(tickers_stress + ['^BVSP'], start=data_inicio, end=data_fim)
+                        dados_crise = data.carregar_dados_historicos(tickers_stress + ['^BVSP'], start=data_inicio, end=data_fim)
                         if not dados_crise.empty and '^BVSP' in dados_crise.columns:
                             primeira_linha = dados_crise.iloc[0]
                             ativos_validos = primeira_linha[primeira_linha > 0].index.tolist()
@@ -702,7 +515,7 @@ elif aba_selecionada == "📊 Minha Carteira":
                                 })
                                 
                                 fig_stress = px.line(df_stress, color_discrete_map={'A Minha Carteira': '#00CC96', 'Ibovespa': '#EF553B'}, labels={'index': 'Período', 'value': 'Impacto (%)', 'variable': 'Ativo/Índice'})
-                                st.plotly_chart(padronizar_grafico(fig_stress.update_xaxes(title_text="Dias após a crise").update_yaxes(title_text="")), use_container_width=True)
+                                st.plotly_chart(components.padronizar_grafico(fig_stress.update_xaxes(title_text="Dias após a crise").update_yaxes(title_text="")), use_container_width=True)
                                 st.error(f"⚠️ No pior momento desta crise, a sua carteira teria caído **{df_stress['A Minha Carteira'].min():.2f}%**.")
                             else: st.warning("Nenhum dos seus ativos atuais tinha capital aberto na época desta crise.")
                         else: st.error("Falha ao se conectar com a B3.")
@@ -711,7 +524,7 @@ elif aba_selecionada == "📊 Minha Carteira":
                 with col_r1:
                     st.subheader("📊 Matriz de Correlação")
                     if st.button("🧬 Gerar Matriz") and not carteira.empty:
-                        dados_corr = carregar_dados_historicos(carteira['ativo'].tolist(), period="1y")
+                        dados_corr = data.carregar_dados_historicos(carteira['ativo'].tolist(), period="1y")
                         if not dados_corr.empty:
                             corr_matrix = dados_corr.pct_change().dropna().corr()
                             corr_matrix.columns =[c.replace('.SA', '').upper() for c in corr_matrix.columns]
@@ -725,11 +538,11 @@ elif aba_selecionada == "📊 Minha Carteira":
                                 zmin=-1, 
                                 zmax=1
                             )
-                            st.plotly_chart(padronizar_grafico(fig_corr), use_container_width=True)
+                            st.plotly_chart(components.padronizar_grafico(fig_corr), use_container_width=True)
                 with col_r2:
                     st.subheader("🌎 Sensibilidade Cambial")
                     if st.button("💵 Analisar Exposição ao Dólar") and not carteira.empty:
-                        dados_macro = carregar_dados_historicos(carteira['ativo'].tolist() +['USDBRL=X'], period="1y")
+                        dados_macro = data.carregar_dados_historicos(carteira['ativo'].tolist() +['USDBRL=X'], period="1y")
                         if not dados_macro.empty and 'USDBRL=X' in dados_macro.columns:
                             ret_m = dados_macro.pct_change().dropna()
                             pesos_m = carteira.set_index('ativo')['valor_patrimonio_atual'] / patrimonio_b3
@@ -751,7 +564,7 @@ elif aba_selecionada == "📊 Minha Carteira":
                                 lpa = info.get('trailingEps')
                                 vpa = info.get('bookValue')
                                 
-                                p_graham = np.sqrt(22.5 * lpa * vpa) if (lpa and vpa and lpa > 0 and vpa > 0) else np.nan
+                                p_graham = np.sqrt(config.GRAHAM_MULTIPLICADOR * lpa * vpa) if (lpa and vpa and lpa > 0 and vpa > 0) else np.nan
                                 margem_graham = ((p_graham / p_atual) - 1) * 100 if pd.notnull(p_graham) and p_atual > 0 else np.nan
                                 div_anual_real = carteira.loc[carteira['ativo'] == ativo, 'dividendos_12m'].values[0]
                                 p_bazin = div_anual_real / yield_desejado if div_anual_real > 0 else np.nan
@@ -766,7 +579,7 @@ elif aba_selecionada == "📊 Minha Carteira":
                     anos = st.slider("Anos:", 1, 30, 10)
                     aporte = st.number_input("Aporte Mensal (R$):", value=1000.0)
                     if st.button("🎲 Simular Futuro") and not carteira.empty:
-                        hist = carregar_dados_historicos(carteira['ativo'].tolist(), period="1y").pct_change().dropna()
+                        hist = data.carregar_dados_historicos(carteira['ativo'].tolist(), period="1y").pct_change().dropna()
                         if not hist.empty:
                             pesos = carteira.set_index('ativo')['valor_patrimonio_atual'] / patrimonio_b3
                             mu, sigma = (hist.mean() * pesos).sum(), (hist * pesos).sum(axis=1).std()
@@ -778,7 +591,7 @@ elif aba_selecionada == "📊 Minha Carteira":
                             df_stats = pd.DataFrame(sims).quantile([0.1, 0.5, 0.9], axis=1).T
                             df_stats.columns =['Pessimista', 'Mediana', 'Otimista']
                             fig_mc = px.line(df_stats, y=['Pessimista', 'Mediana', 'Otimista'], labels={'index': 'Dias', 'value': 'Patrimônio (R$)', 'variable': 'Cenário'})
-                            st.plotly_chart(padronizar_grafico(fig_mc.update_xaxes(title_text="Dias Úteis").update_yaxes(title_text="")), use_container_width=True)
+                            st.plotly_chart(components.padronizar_grafico(fig_mc.update_xaxes(title_text="Dias Úteis").update_yaxes(title_text="")), use_container_width=True)
 
                 with col_ia2:
                     st.subheader("📰 Radar de Notícias")
@@ -800,7 +613,7 @@ elif aba_selecionada == "📊 Minha Carteira":
                 if not carteira.empty:
                     novo_aporte = st.number_input("Valor do Novo Aporte (R$):", value=1000.0, step=100.0)
                     
-                    lista_completa_b3 = buscar_tickers_brapi()
+                    lista_completa_b3 = data.buscar_tickers_brapi(token_brapi)
                     ativos_carteira_limpos = carteira['ativo'].str.replace('.SA', '', regex=False).tolist()
                     pesos_atuais = (carteira['valor_patrimonio_atual'] / patrimonio_b3 * 100).round(2).tolist()
                     
@@ -853,7 +666,7 @@ elif aba_selecionada == "📊 Minha Carteira":
                                     p_ativo = carteira.loc[carteira['ativo'] == ativo_com_sa, 'preco_atual'].values[0]
                                 else:
                                     val_atual = 0.0
-                                    p_ativo = obter_preco_atual(ativo_limpo)
+                                    p_ativo = data.obter_preco_atual(token_brapi, ativo_limpo)
                                 
                                 qtd = int((pat_futuro * alvo_pct - val_atual) / p_ativo) if p_ativo > 0 else 0
                                 
@@ -885,14 +698,14 @@ elif aba_selecionada == "📊 Minha Carteira":
                 st.subheader("🎯 Radar de Distorções e Análise de Fundamentos")
                 fiis_config = {'KNCR11': 'Papel', 'KNIP11': 'Papel', 'MXRF11': 'Papel', 'CPTS11': 'Papel', 'HGCR11': 'Papel', 'VRTA11': 'Papel', 'MCCI11': 'Papel', 'JPPC11': 'Papel', 'HGLG11': 'Logística', 'BTLG11': 'Logística', 'XPLG11': 'Logística', 'HGRU11': 'Híbrido/Urbano', 'BRCO11': 'Logística', 'HSLG11': 'Logística', 'TRBL11': 'Logística', 'KNRI11': 'Híbrido', 'HGRE11': 'Lajes', 'HGPO11': 'Lajes', 'PVBI11': 'Lajes', 'XPML11': 'Shoppings'}
                 with st.spinner("Sincronizando métricas com provedores de dados..."):
-                    df_radar = buscar_pvp_fiis(fiis_config)
+                    df_radar = data.buscar_pvp_fiis(fiis_config)
                     if not df_radar.empty:
                         secoes = {"📄 Carteiras de Recebíveis (Papel/Dívida)": "Papel", "🚛 Logística e Infraestrutura Industrial": "Logística", "🏢 Lajes Corporativas (Escritórios)": "Lajes", "🛍️ Varejo, Shoppings e Estruturas Híbridas":["Shoppings", "Híbrido", "Híbrido/Urbano"]}
                         for titulo, filtro in secoes.items():
                             st.write(f"### {titulo}")
                             df_setor = df_radar[df_radar['Tipo'].isin(filtro)] if isinstance(filtro, list) else df_radar[df_radar['Tipo'] == filtro]
                             if not df_setor.empty:
-                                st.dataframe(df_setor.style.apply(style_pvp_inteligente, axis=1).format({'Preço': 'R$ {:.2f}', 'VPA': 'R$ {:.2f}', 'P/VP': '{:.2f}', 'DY Anual (%)': '{:.2f}%', 'DY Mensal Est. (%)': '{:.2f}%'}), use_container_width=True, hide_index=True)
+                                st.dataframe(df_setor.style.apply(components.style_pvp_inteligente, axis=1).format({'Preço': 'R$ {:.2f}', 'VPA': 'R$ {:.2f}', 'P/VP': '{:.2f}', 'DY Anual (%)': '{:.2f}%', 'DY Mensal Est. (%)': '{:.2f}%'}), use_container_width=True, hide_index=True)
                             else: st.caption("Aguardando atualização de dados para este segmento...")
                         
                         st.divider()
@@ -900,4 +713,6 @@ elif aba_selecionada == "📊 Minha Carteira":
                         st.warning("**Nota de Metodologia:** O P/VP é uma métrica quantitativa e estática que reflete a fotografia do momento. Não deve ser utilizada como único critério de decisão.")
                     else: st.error("Falha na comunicação com a API de dados financeiros.")
 
-        except Exception as e: st.error(f"Erro no processamento principal do Dashboard: {e}")
+        except Exception as e:
+            logger.exception("Erro no processamento principal do Dashboard")
+            st.error(f"Erro no processamento principal do Dashboard: {e}")

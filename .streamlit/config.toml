@@ -9,7 +9,7 @@ base="dark"
 backgroundColor="#0E1117"
 
 # Cor do fundo secundário (Menu lateral e caixas de seleção)
-secondaryBackgroundColor="#1E1E24"
+secondaryBackgroundColor="#252530"
 
 # Cor do texto principal
 textColor="#E0E0E0"
